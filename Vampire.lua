@@ -1,29 +1,30 @@
 --============================================================
--- AUTO HUNTER FARM - STANDALONE / GITHUB LOADSTRING
--- Version: optimized full build
+-- AUTO HUNTER FARM - FREEZE GROUP BUILD
+-- Standalone GitHub / loadstring version
 --
--- Features
---   • Hunter level presets: 100-300 / 400-900 / 1000-3000
---   • Auto equip Fists immediately when Auto Hunter is enabled
---   • Re-equip Fists automatically after respawn / if unequipped
---   • Teleport under nearest matching Hunter
---   • Auto M1: Tool:Activate + fistremote("lmb") + CombatEvent("M1", timestamp)
---   • Adjustable Hunter hitbox
---   • Auto collect Workspace.DroppedMoney.KillMoneyBag
---   • Auto Blood:
---       Blood <= 25%
---       -> stop farming
---       -> remember farm position
---       -> teleport to Vampire Merchant (ShopKeeper2)
---       -> buy "Vampire Blood" with ShopRemote
---       -> equip potion
---       -> drink with DrinkPotionRemote
---       -> wait for blood to refill
---       -> stop emote sound
---       -> return to farm position
---       -> re-equip Fists
---       -> continue farming
---   • Draggable GUI
+-- Flow
+--   1) Choose Hunter level range
+--   2) AUTO HUNTER ON
+--   3) Find every matching "Hunter" in Workspace.NPCS.HUNTERS
+--   4) Pull them into one compact group
+--   5) Freeze/lock the group in place
+--   6) Stand behind the group
+--   7) Auto-equip Fists and M1 continuously
+--   8) Auto-collect KillMoneyBag drops
+--   9) Blood <= 25%:
+--        pause player attacking
+--        keep Hunter group locked
+--        teleport to ShopKeeper2
+--        buy Vampire Blood by remote
+--        equip + drink by remote
+--        wait for blood refill
+--        teleport back behind the frozen group
+--        re-equip Fists and continue
+--
+-- Level presets
+--   100-300
+--   400-900
+--   1000-3000
 --============================================================
 
 --------------------------------------------------------------
@@ -38,7 +39,7 @@ local Player = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
 
 --------------------------------------------------------------
--- ENVIRONMENT / CLEAN PREVIOUS VERSION
+-- ENV / CLEAN PREVIOUS VERSION
 --------------------------------------------------------------
 
 local ENV = _G
@@ -53,9 +54,9 @@ if ENV.AutoHunterFarmStop then
 	pcall(ENV.AutoHunterFarmStop)
 end
 
-local OldGui = PlayerGui:FindFirstChild("AutoHunterFarmGUI")
-if OldGui then
-	OldGui:Destroy()
+local OldGUI = PlayerGui:FindFirstChild("AutoHunterFarmGUI")
+if OldGUI then
+	OldGUI:Destroy()
 end
 
 --------------------------------------------------------------
@@ -66,12 +67,9 @@ local NPCS = workspace:WaitForChild("NPCS")
 local HUNTERS = NPCS:WaitForChild("HUNTERS")
 local DROPPED_MONEY = workspace:WaitForChild("DroppedMoney")
 
-local ArczisCombat =
+local CombatEvent =
 	ReplicatedStorage
 	:WaitForChild("ArczisCombat")
-
-local CombatEvent =
-	ArczisCombat
 	:WaitForChild("Remotes")
 	:WaitForChild("CombatEvent")
 
@@ -99,20 +97,20 @@ local PlayEmoteSound =
 --------------------------------------------------------------
 
 local ATTACK_INTERVAL = 0.20
-local FOLLOW_INTERVAL = 0.035
+local PLAYER_FOLLOW_INTERVAL = 0.035
+local GROUP_LOCK_INTERVAL = 0.045
 local EQUIP_CHECK_INTERVAL = 0.20
 
--- Position below Hunter.HumanoidRootPart.
-local UNDER_DISTANCE = 3.5
+-- Player stands behind the frozen Hunter group.
+local BEHIND_DISTANCE = 4.25
+local MIN_BEHIND_DISTANCE = 2.75
+local MAX_BEHIND_DISTANCE = 6.50
+local BEHIND_STEP = 0.25
 
---------------------------------------------------------------
--- HITBOX SETTINGS
---------------------------------------------------------------
-
-local HITBOX_SIZE = 20
-local MIN_HITBOX = 6
-local MAX_HITBOX = 60
-local HITBOX_STEP = 2
+-- Hunters are packed in a small ring around the group center.
+local GROUP_BASE_RADIUS = 0.75
+local GROUP_RING_GROWTH = 0.30
+local HUNTERS_PER_RING = 8
 
 --------------------------------------------------------------
 -- MONEY SETTINGS
@@ -128,10 +126,10 @@ local MONEY_TOUCH_COOLDOWN = 0.40
 
 local AUTO_BLOOD = true
 
--- Go refill at 25% or below.
+-- Refill only at 25% or below.
 local BLOOD_TRIGGER = 0.25
 
--- Vampire Blood should fill the bar; return once it reaches this.
+-- Vampire Blood fills the bar; resume when detection reaches 90%.
 local BLOOD_RESUME = 0.90
 
 local BLOOD_CHECK_INTERVAL = 0.15
@@ -162,18 +160,18 @@ local LEVEL_PRESETS = {
 	}
 }
 
--- Default highlighted option.
 local SelectedPreset = 1
 
 --------------------------------------------------------------
--- RUNTIME STATE
+-- STATE
 --------------------------------------------------------------
 
 local Enabled = false
 local Running = true
 local RefillingBlood = false
 
-local CurrentTarget = nil
+local GroupAnchorPosition = nil
+local GroupFacing = nil
 
 local LastAttack = 0
 local LastEquipCheck = 0
@@ -182,20 +180,27 @@ local LastBloodCheck = 0
 local LastBloodRefillAttempt = 0
 
 local LastKnownBlood = nil
+local LastFrozenCount = 0
 
-local OriginalHitboxes = {}
-local MoneyAttempt = setmetatable({}, { __mode = "k" })
+-- Hunter -> saved state
+local FrozenStates = {}
+
+local MoneyAttempt =
+	setmetatable(
+		{},
+		{
+			__mode = "k"
+		}
+	)
 
 --------------------------------------------------------------
 -- CHARACTER HELPERS
 --------------------------------------------------------------
 
 local function GetCharacter()
-	local Character = Player.Character
-
-	if not Character then
-		Character = Player.CharacterAdded:Wait()
-	end
+	local Character =
+		Player.Character
+		or Player.CharacterAdded:Wait()
 
 	local Humanoid =
 		Character:FindFirstChildOfClass("Humanoid")
@@ -212,15 +217,24 @@ local function WaitForCharacterReady()
 		or Player.CharacterAdded:Wait()
 
 	local Humanoid =
-		Character:WaitForChild("Humanoid", 10)
+		Character:WaitForChild(
+			"Humanoid",
+			10
+		)
 
 	local Root =
-		Character:WaitForChild("HumanoidRootPart", 10)
+		Character:WaitForChild(
+			"HumanoidRootPart",
+			10
+		)
 
 	return Character, Humanoid, Root
 end
 
-local function SetCharacterCFrame(Root, CFrameValue)
+local function SetCharacterCFrame(
+	Root,
+	CFrameValue
+)
 	if not Root
 		or not Root.Parent then
 		return
@@ -247,6 +261,10 @@ local function GetHunterRoot(Hunter)
 		or Hunter.PrimaryPart
 end
 
+--------------------------------------------------------------
+-- READ HUNTER LEVEL
+--------------------------------------------------------------
+
 local function GetHunterLevel(Hunter)
 	if not Hunter then
 		return nil
@@ -262,7 +280,8 @@ local function GetHunterLevel(Hunter)
 		"level",
 		"lvl"
 	}) do
-		local Value = Hunter:GetAttribute(Name)
+		local Value =
+			Hunter:GetAttribute(Name)
 
 		if typeof(Value) == "number" then
 			return math.floor(Value)
@@ -279,7 +298,9 @@ local function GetHunterLevel(Hunter)
 	-- Value objects
 	----------------------------------------------------------
 
-	for _, Object in ipairs(Hunter:GetDescendants()) do
+	for _, Object in ipairs(
+		Hunter:GetDescendants()
+	) do
 		if Object:IsA("IntValue")
 			or Object:IsA("NumberValue")
 			or Object:IsA("StringValue") then
@@ -301,14 +322,17 @@ local function GetHunterLevel(Hunter)
 	end
 
 	----------------------------------------------------------
-	-- Overhead text, e.g. "Hunter Lv 643"
+	-- Overhead text, e.g. "Hunter Lv 2536"
 	----------------------------------------------------------
 
-	for _, Object in ipairs(Hunter:GetDescendants()) do
+	for _, Object in ipairs(
+		Hunter:GetDescendants()
+	) do
 		if Object:IsA("TextLabel")
 			or Object:IsA("TextButton") then
 
-			local Text = tostring(Object.Text)
+			local Text =
+				tostring(Object.Text)
 
 			local Level =
 				string.match(
@@ -333,6 +357,10 @@ local function GetHunterLevel(Hunter)
 	return nil
 end
 
+--------------------------------------------------------------
+-- LEVEL / TARGET FILTER
+--------------------------------------------------------------
+
 local function IsCorrectLevel(Hunter)
 	local Preset =
 		LEVEL_PRESETS[SelectedPreset]
@@ -355,7 +383,7 @@ local function IsValidHunter(Hunter)
 		return false
 	end
 
-	-- Hunter only; HunterBow is ignored.
+	-- Exact Hunter only. HunterBow is ignored.
 	if Hunter.Name ~= "Hunter" then
 		return false
 	end
@@ -375,134 +403,529 @@ local function IsValidHunter(Hunter)
 	return IsCorrectLevel(Hunter)
 end
 
-local function FindNearestHunter(PlayerRoot)
+local function GetMatchingHunters()
+	local Result = {}
+
+	for _, Hunter in ipairs(
+		HUNTERS:GetChildren()
+	) do
+		if IsValidHunter(Hunter) then
+			Result[#Result + 1] =
+				Hunter
+		end
+	end
+
+	return Result
+end
+
+local function FindNearestMatchingHunter(
+	PlayerRoot
+)
 	if not PlayerRoot then
 		return nil
 	end
 
-	local BestTarget = nil
+	local BestHunter = nil
 	local BestDistance = math.huge
 
-	for _, Hunter in ipairs(HUNTERS:GetChildren()) do
-		if IsValidHunter(Hunter) then
-			local Root =
-				GetHunterRoot(Hunter)
+	for _, Hunter in ipairs(
+		GetMatchingHunters()
+	) do
+		local Root =
+			GetHunterRoot(Hunter)
 
-			if Root then
-				local Distance =
-					(
-						Root.Position
-						- PlayerRoot.Position
-					).Magnitude
+		if Root then
+			local Distance =
+				(
+					Root.Position
+					- PlayerRoot.Position
+				).Magnitude
 
-				if Distance < BestDistance then
-					BestDistance = Distance
-					BestTarget = Hunter
-				end
+			if Distance < BestDistance then
+				BestDistance = Distance
+				BestHunter = Hunter
 			end
 		end
 	end
 
-	return BestTarget, BestDistance
+	return BestHunter
 end
 
 --------------------------------------------------------------
--- HITBOX SYSTEM
+-- GROUP ANCHOR
 --------------------------------------------------------------
 
-local function SaveOriginalHitbox(Root)
-	if OriginalHitboxes[Root] then
-		return
-	end
-
-	OriginalHitboxes[Root] = {
-		Size = Root.Size,
-		Transparency = Root.Transparency,
-		CanCollide = Root.CanCollide,
-		CanTouch = Root.CanTouch,
-		CanQuery = Root.CanQuery
-	}
-end
-
-local function ExpandHunterHitbox(Hunter)
-	local Root = GetHunterRoot(Hunter)
-
-	if not Root
-		or not Root:IsA("BasePart") then
-		return
-	end
-
-	SaveOriginalHitbox(Root)
-
-	Root.Size =
+local function HorizontalUnit(Vector)
+	local Flat =
 		Vector3.new(
-			HITBOX_SIZE,
-			HITBOX_SIZE,
-			HITBOX_SIZE
+			Vector.X,
+			0,
+			Vector.Z
 		)
 
-	Root.Transparency = 0.75
-	Root.CanCollide = false
-	Root.CanTouch = true
-	Root.CanQuery = true
+	if Flat.Magnitude < 0.01 then
+		return Vector3.new(0, 0, -1)
+	end
+
+	return Flat.Unit
 end
 
-local function RestoreHitboxes()
-	for Root, Data in pairs(OriginalHitboxes) do
-		if Root and Root.Parent then
+local function CaptureGroupAnchor()
+	local Character,
+		Humanoid,
+		PlayerRoot =
+		GetCharacter()
+
+	if not PlayerRoot
+		or not Humanoid
+		or Humanoid.Health <= 0 then
+
+		return false
+	end
+
+	local Nearest =
+		FindNearestMatchingHunter(
+			PlayerRoot
+		)
+
+	if not Nearest then
+		GroupAnchorPosition = nil
+		GroupFacing = nil
+
+		return false
+	end
+
+	local HunterRoot =
+		GetHunterRoot(Nearest)
+
+	if not HunterRoot then
+		return false
+	end
+
+	GroupAnchorPosition =
+		HunterRoot.Position
+
+	-- Use the Hunter's current facing so the player's position
+	-- is genuinely behind the group.
+	GroupFacing =
+		HorizontalUnit(
+			HunterRoot.CFrame.LookVector
+		)
+
+	return true
+end
+
+--------------------------------------------------------------
+-- SAVE / RESTORE HUNTER STATE
+--------------------------------------------------------------
+
+local function SaveHunterState(Hunter)
+	if FrozenStates[Hunter] then
+		return FrozenStates[Hunter]
+	end
+
+	local Humanoid =
+		Hunter:FindFirstChildOfClass("Humanoid")
+
+	local Root =
+		GetHunterRoot(Hunter)
+
+	if not Humanoid or not Root then
+		return nil
+	end
+
+	local State = {
+		Humanoid = Humanoid,
+		Root = Root,
+
+		WalkSpeed = Humanoid.WalkSpeed,
+		AutoRotate = Humanoid.AutoRotate,
+		JumpPower = Humanoid.JumpPower,
+		JumpHeight = Humanoid.JumpHeight,
+
+		RootAnchored = Root.Anchored,
+
+		Parts = {}
+	}
+
+	for _, Part in ipairs(
+		Hunter:GetDescendants()
+	) do
+		if Part:IsA("BasePart") then
+			State.Parts[Part] = {
+				CanCollide =
+					Part.CanCollide
+			}
+		end
+	end
+
+	FrozenStates[Hunter] = State
+
+	return State
+end
+
+local function RestoreHunter(Hunter)
+	local State =
+		FrozenStates[Hunter]
+
+	if not State then
+		return
+	end
+
+	local Humanoid =
+		State.Humanoid
+
+	local Root =
+		State.Root
+
+	if Humanoid
+		and Humanoid.Parent then
+
+		pcall(function()
+			Humanoid.WalkSpeed =
+				State.WalkSpeed
+
+			Humanoid.AutoRotate =
+				State.AutoRotate
+
+			Humanoid.JumpPower =
+				State.JumpPower
+
+			Humanoid.JumpHeight =
+				State.JumpHeight
+		end)
+	end
+
+	if Root
+		and Root.Parent then
+
+		pcall(function()
+			Root.Anchored =
+				State.RootAnchored
+		end)
+	end
+
+	for Part, Data in pairs(
+		State.Parts
+	) do
+		if Part
+			and Part.Parent then
+
 			pcall(function()
-				Root.Size = Data.Size
-				Root.Transparency = Data.Transparency
-				Root.CanCollide = Data.CanCollide
-				Root.CanTouch = Data.CanTouch
-				Root.CanQuery = Data.CanQuery
+				Part.CanCollide =
+					Data.CanCollide
 			end)
 		end
 	end
 
-	table.clear(OriginalHitboxes)
+	FrozenStates[Hunter] = nil
 end
 
-local function UpdateHitboxes()
-	RestoreHitboxes()
+local function RestoreAllHunters()
+	local List = {}
 
+	for Hunter in pairs(
+		FrozenStates
+	) do
+		List[#List + 1] =
+			Hunter
+	end
+
+	for _, Hunter in ipairs(List) do
+		RestoreHunter(Hunter)
+	end
+
+	LastFrozenCount = 0
+end
+
+--------------------------------------------------------------
+-- FREEZE + POSITION GROUP
+--------------------------------------------------------------
+
+local function GetGroupSlot(
+	Index,
+	Count
+)
+	-- Compact circular rings around the anchor.
+	local ZeroIndex =
+		Index - 1
+
+	local Ring =
+		math.floor(
+			ZeroIndex
+			/ HUNTERS_PER_RING
+		)
+
+	local PositionInRing =
+		ZeroIndex
+		% HUNTERS_PER_RING
+
+	local ItemsThisRing =
+		math.min(
+			HUNTERS_PER_RING,
+			math.max(
+				1,
+				Count
+				- Ring
+				* HUNTERS_PER_RING
+			)
+		)
+
+	local Radius =
+		GROUP_BASE_RADIUS
+		+ Ring
+		* GROUP_RING_GROWTH
+
+	if Count == 1 then
+		Radius = 0
+	end
+
+	local Angle =
+		(
+			PositionInRing
+			/ ItemsThisRing
+		)
+		* math.pi
+		* 2
+
+	local Right =
+		Vector3.new(
+			-GroupFacing.Z,
+			0,
+			GroupFacing.X
+		)
+
+	local Side =
+		math.cos(Angle)
+		* Radius
+
+	local Forward =
+		math.sin(Angle)
+		* Radius
+
+	return
+		GroupAnchorPosition
+		+ Right * Side
+		+ GroupFacing * Forward
+end
+
+local function LockHunterAt(
+	Hunter,
+	Position
+)
+	local Humanoid =
+		Hunter:FindFirstChildOfClass("Humanoid")
+
+	local Root =
+		GetHunterRoot(Hunter)
+
+	if not Humanoid
+		or not Root
+		or Humanoid.Health <= 0 then
+
+		return false
+	end
+
+	local State =
+		SaveHunterState(Hunter)
+
+	if not State then
+		return false
+	end
+
+	----------------------------------------------------------
+	-- Freeze
+	----------------------------------------------------------
+
+	pcall(function()
+		Humanoid.WalkSpeed = 0
+		Humanoid.AutoRotate = false
+		Humanoid.JumpPower = 0
+		Humanoid.JumpHeight = 0
+	end)
+
+	----------------------------------------------------------
+	-- Disable collision inside the packed group
+	----------------------------------------------------------
+
+	for Part in pairs(
+		State.Parts
+	) do
+		if Part
+			and Part.Parent then
+
+			pcall(function()
+				Part.CanCollide = false
+				Part.AssemblyLinearVelocity =
+					Vector3.zero
+
+				Part.AssemblyAngularVelocity =
+					Vector3.zero
+			end)
+		end
+	end
+
+	----------------------------------------------------------
+	-- Anchor root + lock orientation
+	----------------------------------------------------------
+
+	pcall(function()
+		Root.Anchored = true
+
+		local TargetCFrame =
+			CFrame.lookAt(
+				Position,
+				Position + GroupFacing
+			)
+
+		Hunter:PivotTo(
+			TargetCFrame
+		)
+
+		Root.AssemblyLinearVelocity =
+			Vector3.zero
+
+		Root.AssemblyAngularVelocity =
+			Vector3.zero
+	end)
+
+	return true
+end
+
+local function LockHunterGroup()
 	if not Enabled then
+		return 0
+	end
+
+	if not GroupAnchorPosition
+		or not GroupFacing then
+
+		if not CaptureGroupAnchor() then
+			return 0
+		end
+	end
+
+	local Matching =
+		GetMatchingHunters()
+
+	----------------------------------------------------------
+	-- Restore Hunters that are no longer in the selected group
+	----------------------------------------------------------
+
+	local CurrentSet = {}
+
+	for _, Hunter in ipairs(Matching) do
+		CurrentSet[Hunter] = true
+	end
+
+	local RestoreList = {}
+
+	for Hunter in pairs(
+		FrozenStates
+	) do
+		if not CurrentSet[Hunter]
+			or not Hunter.Parent then
+
+			RestoreList[#RestoreList + 1] =
+				Hunter
+		end
+	end
+
+	for _, Hunter in ipairs(
+		RestoreList
+	) do
+		RestoreHunter(Hunter)
+	end
+
+	----------------------------------------------------------
+	-- Freeze every matching Hunter
+	----------------------------------------------------------
+
+	local Count = 0
+
+	for Index, Hunter in ipairs(
+		Matching
+	) do
+		local Position =
+			GetGroupSlot(
+				Index,
+				#Matching
+			)
+
+		if LockHunterAt(
+			Hunter,
+			Position
+		) then
+
+			Count += 1
+		end
+	end
+
+	LastFrozenCount = Count
+
+	return Count
+end
+
+--------------------------------------------------------------
+-- PLAYER POSITION BEHIND GROUP
+--------------------------------------------------------------
+
+local function MovePlayerBehindGroup(
+	PlayerRoot
+)
+	if not GroupAnchorPosition
+		or not GroupFacing
+		or not PlayerRoot then
+
 		return
 	end
 
-	for _, Hunter in ipairs(HUNTERS:GetChildren()) do
-		if IsValidHunter(Hunter) then
-			ExpandHunterHitbox(Hunter)
-		end
-	end
+	local Position =
+		GroupAnchorPosition
+		- GroupFacing
+		* BEHIND_DISTANCE
+
+	-- Slightly lower than root center so the character does not
+	-- overlap the middle of the packed Hunters.
+	Position +=
+		Vector3.new(
+			0,
+			-0.35,
+			0
+		)
+
+	SetCharacterCFrame(
+		PlayerRoot,
+		CFrame.lookAt(
+			Position,
+			GroupAnchorPosition
+		)
+	)
 end
 
 --------------------------------------------------------------
--- FISTS / ATTACK SYSTEM
+-- FISTS / ATTACK
 --------------------------------------------------------------
 
-local function EquipFists(Character, Humanoid)
+local function EquipFists(
+	Character,
+	Humanoid
+)
 	if not Character
 		or not Humanoid
 		or Humanoid.Health <= 0 then
+
 		return nil
 	end
-
-	----------------------------------------------------------
-	-- Already equipped
-	----------------------------------------------------------
 
 	local Fists =
 		Character:FindFirstChild("Fists")
 
 	if Fists
 		and Fists:IsA("Tool") then
+
 		return Fists
 	end
-
-	----------------------------------------------------------
-	-- Backpack
-	----------------------------------------------------------
 
 	local Backpack =
 		Player:FindFirstChild("Backpack")
@@ -516,6 +939,7 @@ local function EquipFists(Character, Humanoid)
 
 	if not Fists
 		or not Fists:IsA("Tool") then
+
 		return nil
 	end
 
@@ -529,12 +953,14 @@ local function EquipFists(Character, Humanoid)
 end
 
 local function ForceEquipFists()
-	local Character, Humanoid =
+	local Character,
+		Humanoid =
 		GetCharacter()
 
 	if not Character
 		or not Humanoid
 		or Humanoid.Health <= 0 then
+
 		return nil
 	end
 
@@ -544,43 +970,19 @@ local function ForceEquipFists()
 	)
 end
 
-local function TeleportUnderHunter(
-	Hunter,
-	PlayerRoot
+local function Attack(
+	Character,
+	Fists
 )
-	local HunterRoot =
-		GetHunterRoot(Hunter)
-
-	if not HunterRoot
-		or not PlayerRoot then
-		return
-	end
-
-	local Position =
-		HunterRoot.Position
-		- Vector3.new(
-			0,
-			UNDER_DISTANCE,
-			0
-		)
-
-	SetCharacterCFrame(
-		PlayerRoot,
-		CFrame.lookAt(
-			Position,
-			HunterRoot.Position
-		)
-	)
-end
-
-local function Attack(Character, Fists)
-	if not Fists
+	if not Character
+		or not Fists
 		or Fists.Parent ~= Character then
+
 		return
 	end
 
 	----------------------------------------------------------
-	-- Tool activation / animation
+	-- Tool animation / normal activation
 	----------------------------------------------------------
 
 	pcall(function()
@@ -588,7 +990,7 @@ local function Attack(Character, Fists)
 	end)
 
 	----------------------------------------------------------
-	-- Fists remote captured earlier
+	-- Original Fists remote
 	----------------------------------------------------------
 
 	local FistRemote =
@@ -598,12 +1000,14 @@ local function Attack(Character, Fists)
 		and FistRemote:IsA("RemoteEvent") then
 
 		pcall(function()
-			FistRemote:FireServer("lmb")
+			FistRemote:FireServer(
+				"lmb"
+			)
 		end)
 	end
 
 	----------------------------------------------------------
-	-- Arczis Combat M1 captured from CombatEvent
+	-- Arczis Combat M1
 	----------------------------------------------------------
 
 	local Timestamp =
@@ -637,8 +1041,12 @@ local MAX_BLOOD_NAMES = {
 	"maxthirst"
 }
 
-local function NameMatches(Name, List)
-	Name = string.lower(Name)
+local function NameMatches(
+	Name,
+	List
+)
+	Name =
+		string.lower(Name)
 
 	for _, Target in ipairs(List) do
 		if Name == Target then
@@ -649,7 +1057,9 @@ local function NameMatches(Name, List)
 	return false
 end
 
-local function BloodFromAttributes(Object)
+local function BloodFromAttributes(
+	Object
+)
 	if not Object then
 		return nil
 	end
@@ -665,12 +1075,14 @@ local function BloodFromAttributes(Object)
 				Name,
 				BLOOD_NAMES
 			) then
+
 				Current = Value
 
 			elseif NameMatches(
 				Name,
 				MAX_BLOOD_NAMES
 			) then
+
 				Maximum = Value
 			end
 		end
@@ -697,7 +1109,9 @@ local function BloodFromAttributes(Object)
 	return nil
 end
 
-local function BloodFromValues(Root)
+local function BloodFromValues(
+	Root
+)
 	if not Root then
 		return nil
 	end
@@ -715,12 +1129,14 @@ local function BloodFromValues(Root)
 				Object.Name,
 				BLOOD_NAMES
 			) then
+
 				Current = Object.Value
 
 			elseif NameMatches(
 				Object.Name,
 				MAX_BLOOD_NAMES
 			) then
+
 				Maximum = Object.Value
 			end
 		end
@@ -739,6 +1155,7 @@ local function BloodFromValues(Root)
 
 		if Current >= 0
 			and Current <= 100 then
+
 			return Current / 100
 		end
 	end
@@ -746,7 +1163,9 @@ local function BloodFromValues(Root)
 	return nil
 end
 
-local function IsRedGui(Object)
+local function IsRedGui(
+	Object
+)
 	local Color = nil
 
 	pcall(function()
@@ -807,12 +1226,13 @@ local function BloodFromGUI()
 					1,
 					true
 				) then
+
 					NamedBlood = true
 				end
 			end
 
 			--------------------------------------------------
-			-- Text percentage / current-max
+			-- Text-based blood
 			--------------------------------------------------
 
 			if NamedBlood
@@ -833,7 +1253,8 @@ local function BloodFromGUI()
 				if Percent then
 					return
 						math.clamp(
-							tonumber(Percent) / 100,
+							tonumber(Percent)
+								/ 100,
 							0,
 							1
 						)
@@ -882,7 +1303,8 @@ local function BloodFromGUI()
 					and Height > Width * 1.5 then
 
 					local Ratio =
-						Height / ParentHeight
+						Height
+						/ ParentHeight
 
 					if Ratio > 0
 						and Ratio <= 1.05 then
@@ -894,13 +1316,11 @@ local function BloodFromGUI()
 								1
 							)
 
-						local Score = 0
+						local Score = Height
 
 						if NamedBlood then
 							Score += 100
 						end
-
-						Score += Height
 
 						if Width < 80 then
 							Score += 30
@@ -952,12 +1372,9 @@ local function BloodFromGUI()
 end
 
 local function GetBloodPercent()
-	local Character, Humanoid =
+	local Character,
+		Humanoid =
 		GetCharacter()
-
-	----------------------------------------------------------
-	-- Attributes first
-	----------------------------------------------------------
 
 	for _, Object in ipairs({
 		Player,
@@ -973,10 +1390,6 @@ local function GetBloodPercent()
 		end
 	end
 
-	----------------------------------------------------------
-	-- Values second
-	----------------------------------------------------------
-
 	for _, Object in ipairs({
 		Player,
 		Character
@@ -990,10 +1403,6 @@ local function GetBloodPercent()
 		end
 	end
 
-	----------------------------------------------------------
-	-- GUI fallback
-	----------------------------------------------------------
-
 	local Percent =
 		BloodFromGUI()
 
@@ -1006,12 +1415,12 @@ local function GetBloodPercent()
 end
 
 --==============================================================
--- AUTO BLOOD REFILL
+-- AUTO BLOOD
 --==============================================================
 
 local function GetVampireMerchant()
 	----------------------------------------------------------
-	-- Known path from the map
+	-- Known map path
 	----------------------------------------------------------
 
 	local Mapa =
@@ -1050,7 +1459,9 @@ local function GetVampireMerchant()
 	return nil
 end
 
-local function GetMerchantRoot(Merchant)
+local function GetMerchantRoot(
+	Merchant
+)
 	if not Merchant then
 		return nil
 	end
@@ -1068,7 +1479,9 @@ local function FindVampireBlood()
 
 	if Character then
 		local Potion =
-			Character:FindFirstChild("Vampire Blood")
+			Character:FindFirstChild(
+				"Vampire Blood"
+			)
 
 		if Potion then
 			return Potion
@@ -1080,7 +1493,9 @@ local function FindVampireBlood()
 
 	if Backpack then
 		local Potion =
-			Backpack:FindFirstChild("Vampire Blood")
+			Backpack:FindFirstChild(
+				"Vampire Blood"
+			)
 
 		if Potion then
 			return Potion
@@ -1090,7 +1505,9 @@ local function FindVampireBlood()
 	return nil
 end
 
-local function WaitForVampireBlood(Timeout)
+local function WaitForVampireBlood(
+	Timeout
+)
 	local Start = os.clock()
 
 	repeat
@@ -1102,23 +1519,59 @@ local function WaitForVampireBlood(Timeout)
 		end
 
 		task.wait(0.05)
+
 	until
-		os.clock() - Start >= Timeout
+		os.clock() - Start
+		>= Timeout
 
 	return nil
 end
 
 local function StopDrinkEmote()
 	pcall(function()
-		PlayEmoteSound:FireServer("Stop")
+		PlayEmoteSound:FireServer(
+			"Stop"
+		)
 	end)
 end
 
-local function ReturnToFarm(ReturnCFrame)
+local function GetBehindGroupCFrame()
+	if not GroupAnchorPosition
+		or not GroupFacing then
+
+		return nil
+	end
+
+	local Position =
+		GroupAnchorPosition
+		- GroupFacing
+		* BEHIND_DISTANCE
+
+	Position +=
+		Vector3.new(
+			0,
+			-0.35,
+			0
+		)
+
+	return
+		CFrame.lookAt(
+			Position,
+			GroupAnchorPosition
+		)
+end
+
+local function ReturnFromBloodShop(
+	FallbackCFrame
+)
 	local Character,
 		Humanoid,
 		Root =
 		WaitForCharacterReady()
+
+	local ReturnCFrame =
+		GetBehindGroupCFrame()
+		or FallbackCFrame
 
 	if Root
 		and ReturnCFrame then
@@ -1134,8 +1587,6 @@ local function ReturnToFarm(ReturnCFrame)
 	if Enabled then
 		ForceEquipFists()
 	end
-
-	CurrentTarget = nil
 end
 
 local function RefillVampireBlood()
@@ -1159,25 +1610,19 @@ local function RefillVampireBlood()
 		return false
 	end
 
-	----------------------------------------------------------
-	-- Save the farm position.
-	----------------------------------------------------------
-
-	local ReturnCFrame =
+	local FallbackReturnCFrame =
 		Root.CFrame
 
 	----------------------------------------------------------
-	-- Stop attacking / unequip Fists.
+	-- Stop attacking and unequip Fists.
 	----------------------------------------------------------
-
-	CurrentTarget = nil
 
 	pcall(function()
 		Humanoid:UnequipTools()
 	end)
 
 	----------------------------------------------------------
-	-- Find merchant.
+	-- Find merchant
 	----------------------------------------------------------
 
 	local Merchant =
@@ -1187,16 +1632,20 @@ local function RefillVampireBlood()
 		GetMerchantRoot(Merchant)
 
 	if not MerchantRoot then
-		warn("[AUTO BLOOD] ShopKeeper2 not found")
+		warn(
+			"[AUTO BLOOD] ShopKeeper2 not found"
+		)
 
-		ReturnToFarm(ReturnCFrame)
+		ReturnFromBloodShop(
+			FallbackReturnCFrame
+		)
 
 		RefillingBlood = false
 		return false
 	end
 
 	----------------------------------------------------------
-	-- Teleport to the Vampire Merchant and stand still.
+	-- TP in front of merchant
 	----------------------------------------------------------
 
 	local ShopCFrame =
@@ -1215,7 +1664,7 @@ local function RefillVampireBlood()
 	task.wait(SHOP_SETTLE_TIME)
 
 	----------------------------------------------------------
-	-- If a bottle already exists, reuse it.
+	-- Reuse an existing bottle if one is already available.
 	----------------------------------------------------------
 
 	local Potion =
@@ -1223,7 +1672,7 @@ local function RefillVampireBlood()
 
 	if not Potion then
 		------------------------------------------------------
-		-- Purchase directly without opening the shop.
+		-- Direct purchase remote
 		------------------------------------------------------
 
 		pcall(function()
@@ -1240,16 +1689,20 @@ local function RefillVampireBlood()
 	end
 
 	if not Potion then
-		warn("[AUTO BLOOD] Vampire Blood purchase failed")
+		warn(
+			"[AUTO BLOOD] Vampire Blood purchase failed"
+		)
 
-		ReturnToFarm(ReturnCFrame)
+		ReturnFromBloodShop(
+			FallbackReturnCFrame
+		)
 
 		RefillingBlood = false
 		return false
 	end
 
 	----------------------------------------------------------
-	-- Equip Vampire Blood.
+	-- Equip potion
 	----------------------------------------------------------
 
 	pcall(function()
@@ -1263,8 +1716,7 @@ local function RefillVampireBlood()
 		or Potion
 
 	----------------------------------------------------------
-	-- Drink directly using the captured remote.
-	-- The live potion instance is supplied; no DebugId is hardcoded.
+	-- Drink remote
 	----------------------------------------------------------
 
 	pcall(function()
@@ -1274,7 +1726,7 @@ local function RefillVampireBlood()
 	end)
 
 	----------------------------------------------------------
-	-- Wait for blood to refill.
+	-- Wait for full/near-full blood
 	----------------------------------------------------------
 
 	local FillStart =
@@ -1291,29 +1743,34 @@ local function RefillVampireBlood()
 
 			break
 		end
+
 	until
 		os.clock() - FillStart
-			>= BLOOD_FILL_TIMEOUT
+		>= BLOOD_FILL_TIMEOUT
 
 	----------------------------------------------------------
-	-- Stop drink/emote sound then return to farm.
+	-- Stop drink emote/audio and return
 	----------------------------------------------------------
 
 	StopDrinkEmote()
 
 	task.wait(0.08)
 
-	ReturnToFarm(ReturnCFrame)
+	ReturnFromBloodShop(
+		FallbackReturnCFrame
+	)
 
 	RefillingBlood = false
 	return true
 end
 
 --==============================================================
--- MONEY SYSTEM
+-- MONEY
 --==============================================================
 
-local function GetMoneyPart(Bag)
+local function GetMoneyPart(
+	Bag
+)
 	if Bag:IsA("BasePart") then
 		return Bag
 	end
@@ -1344,6 +1801,7 @@ local function CollectBag(
 
 	if not Part
 		or not PlayerRoot then
+
 		return
 	end
 
@@ -1359,10 +1817,12 @@ local function CollectBag(
 	MoneyAttempt[Bag] = Now
 
 	----------------------------------------------------------
-	-- Prefer touch simulation so farming position is not disturbed.
+	-- Prefer touch simulation so player does not leave group.
 	----------------------------------------------------------
 
-	if type(firetouchinterest) == "function" then
+	if type(firetouchinterest)
+		== "function" then
+
 		pcall(function()
 			firetouchinterest(
 				PlayerRoot,
@@ -1383,23 +1843,21 @@ local function CollectBag(
 	end
 
 	----------------------------------------------------------
-	-- Fallback: touch the bag briefly and return.
+	-- Fallback touch teleport
 	----------------------------------------------------------
 
 	local OldCFrame =
 		PlayerRoot.CFrame
 
-	pcall(function()
-		SetCharacterCFrame(
-			PlayerRoot,
-			Part.CFrame
-			+ Vector3.new(
-				0,
-				1.5,
-				0
-			)
+	SetCharacterCFrame(
+		PlayerRoot,
+		Part.CFrame
+		+ Vector3.new(
+			0,
+			1.5,
+			0
 		)
-	end)
+	)
 
 	task.wait(0.045)
 
@@ -1435,7 +1893,9 @@ local function CollectMoney()
 	for _, Object in ipairs(
 		DROPPED_MONEY:GetChildren()
 	) do
-		if Object.Name == "KillMoneyBag" then
+		if Object.Name
+			== "KillMoneyBag" then
+
 			CollectBag(
 				Object,
 				PlayerRoot
@@ -1460,7 +1920,7 @@ GUI.ResetOnSpawn = false
 GUI.Parent = PlayerGui
 
 --------------------------------------------------------------
--- OPEN BUTTON
+-- OPEN
 --------------------------------------------------------------
 
 local Open =
@@ -1500,7 +1960,7 @@ Instance.new(
 	UDim.new(0, 10)
 
 --------------------------------------------------------------
--- MAIN FRAME
+-- FRAME
 --------------------------------------------------------------
 
 local Frame =
@@ -1508,16 +1968,16 @@ local Frame =
 
 Frame.Size =
 	UDim2.fromOffset(
-		390,
-		430
+		400,
+		455
 	)
 
 Frame.Position =
 	UDim2.new(
 		0.5,
-		-195,
+		-200,
 		0.5,
-		-215
+		-227
 	)
 
 Frame.BackgroundColor3 =
@@ -1558,10 +2018,10 @@ Title.Position =
 	)
 
 Title.BackgroundTransparency = 1
-Title.Text = "Auto Hunter Farm"
+Title.Text = "Auto Hunter Freeze Farm"
 Title.TextColor3 = Color3.new(1, 1, 1)
 Title.Font = Enum.Font.GothamBold
-Title.TextSize = 21
+Title.TextSize = 20
 Title.TextXAlignment = Enum.TextXAlignment.Left
 Title.Parent = Frame
 
@@ -1606,7 +2066,7 @@ Instance.new(
 	UDim.new(0, 10)
 
 --------------------------------------------------------------
--- MAIN TOGGLE
+-- AUTO HUNTER
 --------------------------------------------------------------
 
 local Toggle =
@@ -1649,7 +2109,7 @@ LevelTitle.Size =
 		1,
 		0,
 		0,
-		30
+		28
 	)
 
 LevelTitle.Position =
@@ -1680,15 +2140,16 @@ for Index, Preset in ipairs(
 	Button.Size =
 		UDim2.new(
 			0,
-			110,
+			112,
 			0,
 			38
 		)
 
 	Button.Position =
 		UDim2.fromOffset(
-			20 + ((Index - 1) * 120),
-			145
+			20
+				+ ((Index - 1) * 122),
+			143
 		)
 
 	Button.Text = Preset.Name
@@ -1708,13 +2169,13 @@ for Index, Preset in ipairs(
 end
 
 --------------------------------------------------------------
--- HITBOX LABEL
+-- BEHIND DISTANCE
 --------------------------------------------------------------
 
-local HitboxLabel =
+local DistanceLabel =
 	Instance.new("TextLabel")
 
-HitboxLabel.Size =
+DistanceLabel.Size =
 	UDim2.new(
 		1,
 		0,
@@ -1722,114 +2183,102 @@ HitboxLabel.Size =
 		30
 	)
 
-HitboxLabel.Position =
+DistanceLabel.Position =
 	UDim2.fromOffset(
 		0,
 		190
 	)
 
-HitboxLabel.BackgroundTransparency = 1
-HitboxLabel.Text = "Hunter Hitbox Size"
-HitboxLabel.TextColor3 = Color3.new(1, 1, 1)
-HitboxLabel.Font = Enum.Font.GothamBold
-HitboxLabel.TextSize = 15
-HitboxLabel.Parent = Frame
+DistanceLabel.BackgroundTransparency = 1
+DistanceLabel.Text = "Distance Behind Group"
+DistanceLabel.TextColor3 = Color3.new(1, 1, 1)
+DistanceLabel.Font = Enum.Font.GothamBold
+DistanceLabel.TextSize = 15
+DistanceLabel.Parent = Frame
 
---------------------------------------------------------------
--- HITBOX -
---------------------------------------------------------------
-
-local HMinus =
+local DistanceMinus =
 	Instance.new("TextButton")
 
-HMinus.Size =
+DistanceMinus.Size =
 	UDim2.fromOffset(
 		60,
 		42
 	)
 
-HMinus.Position =
+DistanceMinus.Position =
 	UDim2.fromOffset(
-		65,
+		70,
 		220
 	)
 
-HMinus.Text = "−"
-HMinus.TextColor3 = Color3.new(1, 1, 1)
-HMinus.BackgroundColor3 = Color3.fromRGB(65, 65, 75)
-HMinus.Font = Enum.Font.GothamBold
-HMinus.TextSize = 26
-HMinus.Parent = Frame
+DistanceMinus.Text = "−"
+DistanceMinus.TextColor3 = Color3.new(1, 1, 1)
+DistanceMinus.BackgroundColor3 = Color3.fromRGB(65, 65, 75)
+DistanceMinus.Font = Enum.Font.GothamBold
+DistanceMinus.TextSize = 26
+DistanceMinus.Parent = Frame
 
 Instance.new(
 	"UICorner",
-	HMinus
+	DistanceMinus
 ).CornerRadius =
 	UDim.new(0, 8)
 
---------------------------------------------------------------
--- HITBOX VALUE
---------------------------------------------------------------
-
-local HValue =
+local DistanceValue =
 	Instance.new("TextLabel")
 
-HValue.Size =
+DistanceValue.Size =
 	UDim2.fromOffset(
-		80,
+		90,
 		42
 	)
 
-HValue.Position =
+DistanceValue.Position =
 	UDim2.new(
 		0.5,
-		-40,
+		-45,
 		0,
 		220
 	)
 
-HValue.BackgroundTransparency = 1
-HValue.TextColor3 = Color3.new(1, 1, 1)
-HValue.Font = Enum.Font.GothamBold
-HValue.TextSize = 23
-HValue.Parent = Frame
+DistanceValue.BackgroundTransparency = 1
+DistanceValue.TextColor3 = Color3.new(1, 1, 1)
+DistanceValue.Font = Enum.Font.GothamBold
+DistanceValue.TextSize = 22
+DistanceValue.Parent = Frame
 
---------------------------------------------------------------
--- HITBOX +
---------------------------------------------------------------
-
-local HPlus =
+local DistancePlus =
 	Instance.new("TextButton")
 
-HPlus.Size =
+DistancePlus.Size =
 	UDim2.fromOffset(
 		60,
 		42
 	)
 
-HPlus.Position =
+DistancePlus.Position =
 	UDim2.new(
 		1,
-		-125,
+		-130,
 		0,
 		220
 	)
 
-HPlus.Text = "+"
-HPlus.TextColor3 = Color3.new(1, 1, 1)
-HPlus.BackgroundColor3 = Color3.fromRGB(45, 155, 80)
-HPlus.Font = Enum.Font.GothamBold
-HPlus.TextSize = 26
-HPlus.Parent = Frame
+DistancePlus.Text = "+"
+DistancePlus.TextColor3 = Color3.new(1, 1, 1)
+DistancePlus.BackgroundColor3 = Color3.fromRGB(45, 155, 80)
+DistancePlus.Font = Enum.Font.GothamBold
+DistancePlus.TextSize = 26
+DistancePlus.Parent = Frame
 
 Instance.new(
 	"UICorner",
-	HPlus
+	DistancePlus
 ).CornerRadius =
 	UDim.new(0, 8)
 
 --------------------------------------------------------------
--- AUTO BLOOD
+-- AUTO BLOOD / MONEY
 --------------------------------------------------------------
 
 local BloodButton =
@@ -1846,7 +2295,7 @@ BloodButton.Size =
 BloodButton.Position =
 	UDim2.fromOffset(
 		18,
-		277
+		278
 	)
 
 BloodButton.TextColor3 = Color3.new(1, 1, 1)
@@ -1859,10 +2308,6 @@ Instance.new(
 	BloodButton
 ).CornerRadius =
 	UDim.new(0, 9)
-
---------------------------------------------------------------
--- AUTO MONEY
---------------------------------------------------------------
 
 local MoneyButton =
 	Instance.new("TextButton")
@@ -1880,7 +2325,7 @@ MoneyButton.Position =
 		0.5,
 		6,
 		0,
-		277
+		278
 	)
 
 MoneyButton.TextColor3 = Color3.new(1, 1, 1)
@@ -1906,13 +2351,13 @@ BloodStatus.Size =
 		1,
 		-20,
 		0,
-		30
+		28
 	)
 
 BloodStatus.Position =
 	UDim2.fromOffset(
 		10,
-		329
+		332
 	)
 
 BloodStatus.BackgroundTransparency = 1
@@ -1921,6 +2366,34 @@ BloodStatus.TextColor3 = Color3.fromRGB(220, 120, 120)
 BloodStatus.Font = Enum.Font.GothamBold
 BloodStatus.TextSize = 13
 BloodStatus.Parent = Frame
+
+--------------------------------------------------------------
+-- GROUP STATUS
+--------------------------------------------------------------
+
+local GroupStatus =
+	Instance.new("TextLabel")
+
+GroupStatus.Size =
+	UDim2.new(
+		1,
+		-20,
+		0,
+		28
+	)
+
+GroupStatus.Position =
+	UDim2.fromOffset(
+		10,
+		360
+	)
+
+GroupStatus.BackgroundTransparency = 1
+GroupStatus.Text = "Frozen Hunters: 0"
+GroupStatus.TextColor3 = Color3.fromRGB(130, 190, 230)
+GroupStatus.Font = Enum.Font.GothamBold
+GroupStatus.TextSize = 13
+GroupStatus.Parent = Frame
 
 --------------------------------------------------------------
 -- STATUS
@@ -1942,7 +2415,7 @@ Status.Position =
 		0,
 		10,
 		1,
-		-67
+		-62
 	)
 
 Status.BackgroundTransparency = 1
@@ -1976,8 +2449,11 @@ local function UpdateGUI()
 		end
 	end
 
-	HValue.Text =
-		tostring(HITBOX_SIZE)
+	DistanceValue.Text =
+		string.format(
+			"%.2f",
+			BEHIND_DISTANCE
+		)
 
 	if AUTO_BLOOD then
 		BloodButton.Text = "AUTO BLOOD : ON"
@@ -1994,6 +2470,12 @@ local function UpdateGUI()
 		MoneyButton.Text = "AUTO MONEY : OFF"
 		MoneyButton.BackgroundColor3 = Color3.fromRGB(65, 65, 75)
 	end
+
+	GroupStatus.Text =
+		"Frozen Hunters: "
+		.. tostring(
+			LastFrozenCount
+		)
 end
 
 --------------------------------------------------------------
@@ -2005,10 +2487,22 @@ for Index, Button in ipairs(
 ) do
 	Button.MouseButton1Click:Connect(
 		function()
-			SelectedPreset = Index
-			CurrentTarget = nil
+			if SelectedPreset == Index then
+				return
+			end
 
-			UpdateHitboxes()
+			SelectedPreset = Index
+
+			RestoreAllHunters()
+
+			GroupAnchorPosition = nil
+			GroupFacing = nil
+
+			if Enabled then
+				CaptureGroupAnchor()
+				LockHunterGroup()
+			end
+
 			UpdateGUI()
 		end
 	)
@@ -2017,64 +2511,67 @@ end
 Toggle.MouseButton1Click:Connect(
 	function()
 		Enabled = not Enabled
-		CurrentTarget = nil
 
 		if Enabled then
-			--------------------------------------------------
-			-- Equip Fists immediately when Auto Hunter turns ON.
-			--------------------------------------------------
-
-			Status.Text = "Equipping Fists..."
+			Status.Text =
+				"Gathering Hunters..."
 
 			ForceEquipFists()
 
-			UpdateHitboxes()
+			GroupAnchorPosition = nil
+			GroupFacing = nil
 
-			Status.Text = "Searching Hunter..."
+			CaptureGroupAnchor()
+			LockHunterGroup()
 		else
-			RestoreHitboxes()
 			Status.Text = "Stopped"
+
+			RestoreAllHunters()
+
+			GroupAnchorPosition = nil
+			GroupFacing = nil
 		end
 
 		UpdateGUI()
 	end
 )
 
-HPlus.MouseButton1Click:Connect(
+DistancePlus.MouseButton1Click:Connect(
 	function()
-		HITBOX_SIZE += HITBOX_STEP
+		BEHIND_DISTANCE +=
+			BEHIND_STEP
 
-		HITBOX_SIZE =
+		BEHIND_DISTANCE =
 			math.clamp(
-				HITBOX_SIZE,
-				MIN_HITBOX,
-				MAX_HITBOX
+				BEHIND_DISTANCE,
+				MIN_BEHIND_DISTANCE,
+				MAX_BEHIND_DISTANCE
 			)
 
-		UpdateHitboxes()
 		UpdateGUI()
 	end
 )
 
-HMinus.MouseButton1Click:Connect(
+DistanceMinus.MouseButton1Click:Connect(
 	function()
-		HITBOX_SIZE -= HITBOX_STEP
+		BEHIND_DISTANCE -=
+			BEHIND_STEP
 
-		HITBOX_SIZE =
+		BEHIND_DISTANCE =
 			math.clamp(
-				HITBOX_SIZE,
-				MIN_HITBOX,
-				MAX_HITBOX
+				BEHIND_DISTANCE,
+				MIN_BEHIND_DISTANCE,
+				MAX_BEHIND_DISTANCE
 			)
 
-		UpdateHitboxes()
 		UpdateGUI()
 	end
 )
 
 BloodButton.MouseButton1Click:Connect(
 	function()
-		AUTO_BLOOD = not AUTO_BLOOD
+		AUTO_BLOOD =
+			not AUTO_BLOOD
 
 		UpdateGUI()
 	end
@@ -2082,7 +2579,8 @@ BloodButton.MouseButton1Click:Connect(
 
 MoneyButton.MouseButton1Click:Connect(
 	function()
-		AUTO_MONEY = not AUTO_MONEY
+		AUTO_MONEY =
+			not AUTO_MONEY
 
 		UpdateGUI()
 	end
@@ -2101,31 +2599,256 @@ Close.MouseButton1Click:Connect(
 	end
 )
 
---------------------------------------------------------------
--- NEW HUNTER SPAWN
---------------------------------------------------------------
+--==============================================================
+-- GROUP LOCK LOOP
+-- Keeps Hunters frozen even while player is away buying blood.
+--==============================================================
 
-HUNTERS.ChildAdded:Connect(
-	function(Hunter)
-		task.wait(0.25)
+task.spawn(function()
+	while Running
+		and GUI.Parent do
+
+		if Enabled then
+			local Count =
+				LockHunterGroup()
+
+			if Count ~= LastFrozenCount then
+				LastFrozenCount = Count
+			end
+
+			GroupStatus.Text =
+				"Frozen Hunters: "
+				.. tostring(Count)
+		end
+
+		task.wait(
+			GROUP_LOCK_INTERVAL
+		)
+	end
+end)
+
+--==============================================================
+-- BLOOD LOOP
+--==============================================================
+
+task.spawn(function()
+	while Running
+		and GUI.Parent do
 
 		if Enabled
-			and IsValidHunter(Hunter) then
+			and AUTO_BLOOD
+			and not RefillingBlood then
 
-			ExpandHunterHitbox(Hunter)
+			local Now = os.clock()
+
+			if Now - LastBloodCheck
+				>= BLOOD_CHECK_INTERVAL then
+
+				LastBloodCheck = Now
+
+				local Blood =
+					GetBloodPercent()
+
+				if Blood then
+					BloodStatus.Text =
+						string.format(
+							"Blood: %.0f%%",
+							Blood * 100
+						)
+
+					if Blood <= BLOOD_TRIGGER
+						and Now - LastBloodRefillAttempt
+							>= BLOOD_RETRY_DELAY then
+
+						LastBloodRefillAttempt =
+							Now
+
+						Status.Text =
+							"Blood low - buying Vampire Blood..."
+
+						RefillVampireBlood()
+
+						local NewBlood =
+							GetBloodPercent()
+
+						if NewBlood then
+							BloodStatus.Text =
+								string.format(
+									"Blood: %.0f%%",
+									NewBlood * 100
+								)
+						end
+
+						Status.Text =
+							"Returned to Hunter group"
+					end
+				else
+					BloodStatus.Text =
+						"Blood: detecting..."
+				end
+			end
 		end
-	end
-)
 
---------------------------------------------------------------
--- AUTO RE-EQUIP AFTER RESPAWN
---------------------------------------------------------------
+		task.wait(0.05)
+	end
+end)
+
+--==============================================================
+-- MONEY LOOP
+--==============================================================
+
+task.spawn(function()
+	while Running
+		and GUI.Parent do
+
+		if Enabled
+			and AUTO_MONEY
+			and not RefillingBlood then
+
+			local Now = os.clock()
+
+			if Now - LastMoneyScan
+				>= MONEY_SCAN_INTERVAL then
+
+				LastMoneyScan = Now
+				CollectMoney()
+			end
+		end
+
+		task.wait(0.08)
+	end
+end)
+
+--==============================================================
+-- PLAYER FARM LOOP
+--==============================================================
+
+task.spawn(function()
+	while Running
+		and GUI.Parent do
+
+		if Enabled
+			and not RefillingBlood then
+
+			local Character,
+				Humanoid,
+				PlayerRoot =
+				GetCharacter()
+
+			if Humanoid
+				and PlayerRoot
+				and Humanoid.Health > 0 then
+
+				------------------------------------------------
+				-- Ensure group exists
+				------------------------------------------------
+
+				if not GroupAnchorPosition
+					or not GroupFacing then
+
+					CaptureGroupAnchor()
+				end
+
+				if GroupAnchorPosition
+					and GroupFacing then
+
+					------------------------------------------------
+					-- Keep Fists equipped
+					------------------------------------------------
+
+					local Now =
+						os.clock()
+
+					if Now - LastEquipCheck
+						>= EQUIP_CHECK_INTERVAL then
+
+						LastEquipCheck =
+							Now
+
+						local Fists =
+							Character:FindFirstChild(
+								"Fists"
+							)
+
+						if not Fists
+							or not Fists:IsA(
+								"Tool"
+							) then
+
+							EquipFists(
+								Character,
+								Humanoid
+							)
+						end
+					end
+
+					local Fists =
+						EquipFists(
+							Character,
+							Humanoid
+						)
+
+					------------------------------------------------
+					-- Stand behind frozen Hunter group
+					------------------------------------------------
+
+					MovePlayerBehindGroup(
+						PlayerRoot
+					)
+
+					------------------------------------------------
+					-- Attack
+					------------------------------------------------
+
+					if Now - LastAttack
+						>= ATTACK_INTERVAL then
+
+						LastAttack = Now
+
+						Attack(
+							Character,
+							Fists
+						)
+					end
+
+					local Preset =
+						LEVEL_PRESETS[
+							SelectedPreset
+						]
+
+					Status.Text =
+						"Lv "
+						.. Preset.Name
+						.. " | Frozen "
+						.. tostring(
+							LastFrozenCount
+						)
+				else
+					local Preset =
+						LEVEL_PRESETS[
+							SelectedPreset
+						]
+
+					Status.Text =
+						"No Hunter Lv "
+						.. Preset.Name
+				end
+			end
+		end
+
+		task.wait(
+			PLAYER_FOLLOW_INTERVAL
+		)
+	end
+end)
+
+--==============================================================
+-- RESPAWN
+--==============================================================
 
 Player.CharacterAdded:Connect(
 	function(Character)
-		CurrentTarget = nil
-
-		if not Enabled then
+		if not Running then
 			return
 		end
 
@@ -2147,253 +2870,24 @@ Player.CharacterAdded:Connect(
 			and Humanoid.Health > 0 then
 
 			ForceEquipFists()
+
+			if GroupAnchorPosition
+				and GroupFacing then
+
+				local Root =
+					Character:FindFirstChild(
+						"HumanoidRootPart"
+					)
+
+				if Root then
+					MovePlayerBehindGroup(
+						Root
+					)
+				end
+			end
 		end
 	end
 )
-
---==============================================================
--- MAIN LOOP
---==============================================================
-
-task.spawn(function()
-	while Running
-		and GUI.Parent do
-
-		local Character,
-			Humanoid,
-			PlayerRoot =
-			GetCharacter()
-
-		if Humanoid
-			and PlayerRoot
-			and Humanoid.Health > 0 then
-
-			local Now = os.clock()
-
-			--------------------------------------------------
-			-- BLOOD CHECK
-			--------------------------------------------------
-
-			if AUTO_BLOOD
-				and not RefillingBlood
-				and Now - LastBloodCheck
-					>= BLOOD_CHECK_INTERVAL then
-
-				LastBloodCheck = Now
-
-				local BloodPercent =
-					GetBloodPercent()
-
-				if BloodPercent then
-					BloodStatus.Text =
-						string.format(
-							"Blood: %.0f%%",
-							BloodPercent * 100
-						)
-
-					--------------------------------------------------
-					-- At or below 25% -> stop farm and refill.
-					--------------------------------------------------
-
-					if BloodPercent <= BLOOD_TRIGGER
-						and Now - LastBloodRefillAttempt
-							>= BLOOD_RETRY_DELAY then
-
-						LastBloodRefillAttempt = Now
-
-						Status.Text =
-							"Blood low - buying Vampire Blood..."
-
-						------------------------------------------------
-						-- Run refill as the current action.
-						-- Farming remains paused while RefillingBlood=true.
-						------------------------------------------------
-
-						RefillVampireBlood()
-
-						------------------------------------------------
-						-- Re-read blood after refill.
-						------------------------------------------------
-
-						local NewBlood =
-							GetBloodPercent()
-
-						if NewBlood then
-							BloodStatus.Text =
-								string.format(
-									"Blood: %.0f%%",
-									NewBlood * 100
-								)
-						end
-
-						task.wait(0.05)
-						continue
-					end
-				else
-					BloodStatus.Text =
-						"Blood: detecting..."
-				end
-			end
-
-			--------------------------------------------------
-			-- REFILL MODE BLOCKS FARM/MONEY
-			--------------------------------------------------
-
-			if RefillingBlood then
-				task.wait(0.05)
-				continue
-			end
-
-			--------------------------------------------------
-			-- AUTO MONEY
-			--------------------------------------------------
-
-			if AUTO_MONEY
-				and Now - LastMoneyScan
-					>= MONEY_SCAN_INTERVAL then
-
-				LastMoneyScan = Now
-
-				local MoneyCount =
-					CollectMoney()
-
-				if MoneyCount > 0
-					and not Enabled then
-
-					Status.Text =
-						"Collecting money: "
-						.. MoneyCount
-				end
-			end
-
-			--------------------------------------------------
-			-- FARM
-			--------------------------------------------------
-
-			if Enabled then
-				------------------------------------------------
-				-- Keep Fists equipped at all times.
-				------------------------------------------------
-
-				if Now - LastEquipCheck
-					>= EQUIP_CHECK_INTERVAL then
-
-					LastEquipCheck = Now
-
-					local Equipped =
-						Character:FindFirstChild("Fists")
-
-					if not Equipped
-						or not Equipped:IsA("Tool") then
-
-						EquipFists(
-							Character,
-							Humanoid
-						)
-					end
-				end
-
-				------------------------------------------------
-				-- Find / refresh target.
-				------------------------------------------------
-
-				if not IsValidHunter(
-					CurrentTarget
-				) then
-
-					CurrentTarget =
-						FindNearestHunter(
-							PlayerRoot
-						)
-				end
-
-				if CurrentTarget then
-					local HunterLevel =
-						GetHunterLevel(
-							CurrentTarget
-						)
-
-					local HunterHumanoid =
-						CurrentTarget
-						:FindFirstChildOfClass(
-							"Humanoid"
-						)
-
-					------------------------------------------------
-					-- Hitbox
-					------------------------------------------------
-
-					ExpandHunterHitbox(
-						CurrentTarget
-					)
-
-					------------------------------------------------
-					-- Fists
-					------------------------------------------------
-
-					local Fists =
-						EquipFists(
-							Character,
-							Humanoid
-						)
-
-					------------------------------------------------
-					-- TP under Hunter
-					------------------------------------------------
-
-					TeleportUnderHunter(
-						CurrentTarget,
-						PlayerRoot
-					)
-
-					------------------------------------------------
-					-- Status
-					------------------------------------------------
-
-					if HunterHumanoid then
-						Status.Text =
-							"Hunter Lv "
-							.. tostring(
-								HunterLevel or "?"
-							)
-							.. " | HP "
-							.. tostring(
-								math.floor(
-									HunterHumanoid.Health
-								)
-							)
-					end
-
-					------------------------------------------------
-					-- Attack
-					------------------------------------------------
-
-					if Now - LastAttack
-						>= ATTACK_INTERVAL then
-
-						LastAttack = Now
-
-						Attack(
-							Character,
-							Fists
-						)
-					end
-				else
-					local Preset =
-						LEVEL_PRESETS[
-							SelectedPreset
-						]
-
-					Status.Text =
-						"No Hunter Lv "
-						.. Preset.Name
-				end
-			end
-		end
-
-		task.wait(FOLLOW_INTERVAL)
-	end
-end)
 
 --==============================================================
 -- DRAG GUI
@@ -2469,16 +2963,22 @@ local function Stop()
 	Enabled = false
 	RefillingBlood = false
 
-	RestoreHitboxes()
+	RestoreAllHunters()
+
+	GroupAnchorPosition = nil
+	GroupFacing = nil
 
 	if GUI then
 		GUI:Destroy()
 	end
 
-	print("[Auto Hunter Farm] stopped")
+	print(
+		"[Auto Hunter Freeze Farm] stopped"
+	)
 end
 
-ENV.AutoHunterFarmStop = Stop
+ENV.AutoHunterFarmStop =
+	Stop
 
 --------------------------------------------------------------
 -- START
@@ -2488,18 +2988,21 @@ UpdateGUI()
 
 print("")
 print("================================================")
-print(" AUTO HUNTER FARM READY")
+print(" AUTO HUNTER FREEZE FARM READY")
 print("================================================")
 print("Hunter levels:")
 print(" 100 - 300")
 print(" 400 - 900")
 print(" 1000 - 3000")
 print("")
-print("Auto equip Fists: ON when Auto Hunter is enabled")
+print("Mode:")
+print(" Gather ALL matching Hunters")
+print(" Freeze/lock them in a compact group")
+print(" Stand behind group")
+print(" Auto equip Fists")
+print(" Auto M1")
+print("")
+print("Auto Blood: <= 25%")
 print("Auto Money: ON")
-print("Auto Blood trigger: <= 25%")
-print("Auto Blood action:")
-print(" ShopKeeper2 -> Purchase Vampire Blood -> Equip -> Drink -> Return")
-print("Hunter Hitbox:", HITBOX_SIZE)
-print("Under Hunter:", UNDER_DISTANCE)
+print("Behind Distance:", BEHIND_DISTANCE)
 print("================================================")
