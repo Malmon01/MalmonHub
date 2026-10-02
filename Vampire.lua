@@ -1,5 +1,5 @@
 -- AUTO HUNTER HIT-LOCK FARM
--- Priority: hit reliability, not long range.
+-- Priority: hit reliability + automatic fast punching.
 -- Uses current combat system:
 -- ReplicatedStorage.Funções.Game15Fists.CombatRemote:FireServer("Attack")
 
@@ -7,6 +7,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local Player = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
@@ -45,7 +46,9 @@ local MAX_FOLLOW_DISTANCE = 3.00
 local FOLLOW_STEP = 0.10
 
 local MAX_ATTACK_DISTANCE = 2.95
-local ATTACK_INTERVAL = 0.47
+-- Auto-click cadence. The game/client can still enforce its own M1 cooldown.
+-- Manual clicking works in this game, so Tool:Activate() is used to mimic it.
+local ATTACK_INTERVAL = 0.10
 local REQUIRED_STABLE_FRAMES = 3
 local TARGET_RECHECK_INTERVAL = 0.15
 local EQUIP_CHECK_INTERVAL = 0.12
@@ -54,11 +57,24 @@ local AUTO_MONEY = true
 local MONEY_SCAN_INTERVAL = 0.35
 local MONEY_TOUCH_COOLDOWN = 0.40
 
+--------------------------------------------------------------
+-- AUTO DRINK BLOOD
+--------------------------------------------------------------
+
+-- Every 30 seconds while AUTO HUNTER is ON:
+-- press E 3 times, then start a new 30-second countdown.
+local AUTO_DRINK_BLOOD = true
+local DRINK_INTERVAL = 30
+local DRINK_PRESS_COUNT = 3
+local DRINK_PRESS_GAP = 0.20
+local KEY_PRESS_TIME = 0.05
+
 local LastAttack = 0
 local LastTargetRecheck = 0
 local LastEquipCheck = 0
 local LastMoneyScan = 0
 local LastCombatResolve = 0
+local LastDrinkCycle = os.clock()
 local StableFrames = 0
 local LastTargetHealth = nil
 local MoneyAttempt = setmetatable({}, {__mode="k"})
@@ -198,17 +214,88 @@ local function RearCFrame(target)
 	return CFrame.lookAt(pos, root.Position)
 end
 
-local function FireAttack()
-	local r = CombatRemote
-	if not r or not r.Parent then
-		r = ResolveCombatRemote()
+local function AutoPunch(Fists)
+	if not Fists
+		or not Fists.Parent then
+		return false
 	end
-	if not r then return false end
 
-	return pcall(function()
-		r:FireServer("Attack")
+	-- Mimic a real/manual punch. In the current Game15Fists system,
+	-- the equipped Fists client handles the normal combat flow after
+	-- Tool.Activated fires.
+	local Success = pcall(function()
+		Fists:Activate()
 	end)
+
+	return Success
 end
+
+--------------------------------------------------------------
+-- PRESS E / DRINK BLOOD
+--------------------------------------------------------------
+
+local function PressEOnce()
+	local sent = false
+
+	-- Preferred method.
+	pcall(function()
+		VirtualInputManager:SendKeyEvent(
+			true,
+			Enum.KeyCode.E,
+			false,
+			game
+		)
+
+		task.wait(KEY_PRESS_TIME)
+
+		VirtualInputManager:SendKeyEvent(
+			false,
+			Enum.KeyCode.E,
+			false,
+			game
+		)
+
+		sent = true
+	end)
+
+	if sent then
+		return true
+	end
+
+	-- Fallback for environments that expose keypress/keyrelease.
+	if type(keypress) == "function" then
+		pcall(function()
+			keypress(0x45)
+			task.wait(KEY_PRESS_TIME)
+
+			if type(keyrelease) == "function" then
+				keyrelease(0x45)
+			end
+		end)
+
+		return true
+	end
+
+	return false
+end
+
+local function DrinkBloodCycle()
+	for i = 1, DRINK_PRESS_COUNT do
+		if not Running or not Enabled then
+			return
+		end
+
+		PressEOnce()
+
+		if i < DRINK_PRESS_COUNT then
+			task.wait(DRINK_PRESS_GAP)
+		end
+	end
+end
+
+--------------------------------------------------------------
+-- MONEY
+--------------------------------------------------------------
 
 local function GetMoneyPart(bag)
 	if bag:IsA("BasePart") then return bag end
@@ -427,7 +514,7 @@ local function UpdateGUI()
 
 	remoteStatus.Text =
 		(CombatRemote and CombatRemote.Parent)
-		and "CombatRemote: READY | strict distance check"
+		and "CombatRemote: READY | AUTO PUNCH ON"
 		or "CombatRemote: NOT FOUND"
 end
 
@@ -451,6 +538,10 @@ toggle.MouseButton1Click:Connect(function()
 		ResolveCombatRemote()
 		local c,h = GetCharacter()
 		EquipFists(c,h)
+
+		-- Start a fresh 30-second drink timer each time Auto Hunter is enabled.
+		LastDrinkCycle = os.clock()
+
 		status.Text = "Searching Hunter..."
 	else
 		status.Text = "Stopped"
@@ -536,6 +627,30 @@ task.spawn(function()
 			end
 		end
 		task.wait(0.08)
+	end
+end)
+
+-- Auto Drink Blood
+task.spawn(function()
+	while Running and gui.Parent do
+		if Enabled and AUTO_DRINK_BLOOD then
+			local now = os.clock()
+
+			if now - LastDrinkCycle >= DRINK_INTERVAL then
+				-- Reset the timer at the start of this cycle.
+				LastDrinkCycle = now
+
+				-- The game's drinking animation naturally prevents punching
+				-- while the drink action is active, so the punch system itself
+				-- is intentionally left unchanged.
+				DrinkBloodCycle()
+			end
+		else
+			-- Do not let time accumulate while Auto Hunter is OFF.
+			LastDrinkCycle = os.clock()
+		end
+
+		task.wait(0.10)
 	end
 end)
 
@@ -632,13 +747,16 @@ HeartbeatConnection = RunService.Heartbeat:Connect(function()
 			end
 		end
 
-		-- One more strict range check immediately before FireServer.
+		-- One more strict range check immediately before auto punch.
 		realDistance = (targetRoot.Position - root.Position).Magnitude
 
 		if realDistance <= MAX_ATTACK_DISTANCE then
 			LastAttack = now
-			hitStatus.Text = "Hit status: attacking..."
-			FireAttack()
+			hitStatus.Text = "Hit status: AUTO PUNCH"
+
+			-- This is the important change:
+			-- use Tool:Activate() just like the manual click that already works.
+			AutoPunch(fists)
 		end
 	end
 end)
@@ -710,5 +828,7 @@ print(" Priority: HIT RELIABILITY")
 print(" Follow distance:", FOLLOW_DISTANCE)
 print(" Attack only <=", MAX_ATTACK_DISTANCE)
 print(" Stable frames:", REQUIRED_STABLE_FRAMES)
-print(" Attack interval:", ATTACK_INTERVAL)
+print(" Auto punch interval:", ATTACK_INTERVAL)
+print(" Auto Drink Blood: every", DRINK_INTERVAL, "seconds")
+print(" E presses per drink cycle:", DRINK_PRESS_COUNT)
 print("==============================================")
