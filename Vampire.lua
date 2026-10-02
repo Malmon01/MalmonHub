@@ -1,23 +1,17 @@
 --============================================================
--- AUTO HUNTER SAFE FARM - STANDALONE
--- GitHub / loadstring version
+-- AUTO HUNTER LONG-REACH SAFE FARM
+-- Standalone GitHub / loadstring version
 --
--- Main idea:
---   • DO NOT freeze or move NPCs.
---   • Always attack Hunter at its real server position.
---   • Pick the safest Hunter in the selected level range.
---   • Stay behind the target and constantly re-position.
---   • If the player takes damage, briefly stop attacking and
---     move to the safest rear position before continuing.
---   • Auto Blood at <= 25%:
---       pause farm -> ShopKeeper2 -> buy Vampire Blood
---       -> equip -> DrinkPotionRemote -> wait -> return
---   • Auto Money from Workspace.DroppedMoney.KillMoneyBag
+-- NO Auto Blood. NO NPC freeze/move.
+-- Uses the current Game15Fists CombatRemote:
+--   CombatRemote:FireServer("Attack")
 --
--- Hunter level presets:
---   100-300
---   400-900
---   1000-3000
+-- Safe-strike flow:
+--   stay far behind Hunter -> blink into valid M1 range
+--   -> send Attack -> instantly return to safe distance
+--
+-- AUTO RANGE gradually searches for the farthest strike distance
+-- that still causes damage, then backs off if hits stop landing.
 --============================================================
 
 --------------------------------------------------------------
@@ -60,30 +54,37 @@ end
 
 local NPCS = workspace:WaitForChild("NPCS")
 local HUNTERS = NPCS:WaitForChild("HUNTERS")
-local DROPPED_MONEY = workspace:WaitForChild("DroppedMoney")
+local DROPPED_MONEY = workspace:FindFirstChild("DroppedMoney")
 
-local CombatEvent =
-	ReplicatedStorage
-	:WaitForChild("ArczisCombat")
-	:WaitForChild("Remotes")
-	:WaitForChild("CombatEvent")
+-- Current combat system. Never WaitForChild forever here.
+local CombatRemote = nil
 
-local Funcoes =
-	ReplicatedStorage["Fun\195\167\195\181es"]
+local function ResolveCombatRemote()
+	local Funcoes =
+		ReplicatedStorage:FindFirstChild(
+			"Fun\195\167\195\181es"
+		)
 
-local Eventos =
-	Funcoes:WaitForChild("Eventos")
+	local Game15Fists =
+		Funcoes
+		and Funcoes:FindFirstChild("Game15Fists")
 
-local ShopRemote =
-	Eventos:WaitForChild("ShopRemote")
+	local Remote =
+		Game15Fists
+		and Game15Fists:FindFirstChild("CombatRemote")
 
-local DrinkPotionRemote =
-	Eventos:WaitForChild("DrinkPotionRemote")
+	if Remote
+		and Remote:IsA("RemoteEvent") then
 
-local PlayEmoteSound =
-	ReplicatedStorage
-	:WaitForChild("EmoteSystemRemotes")
-	:WaitForChild("PlayEmoteSound")
+		CombatRemote = Remote
+		return Remote
+	end
+
+	CombatRemote = nil
+	return nil
+end
+
+ResolveCombatRemote()
 
 --------------------------------------------------------------
 -- LEVEL PRESETS
@@ -114,10 +115,10 @@ local SelectedPreset = 1
 --------------------------------------------------------------
 
 -- Stay close enough for the game's real M1 distance check.
-local BEHIND_DISTANCE = 3.65
-local MIN_BEHIND_DISTANCE = 2.80
-local MAX_BEHIND_DISTANCE = 4.40
-local BEHIND_STEP = 0.15
+local BEHIND_DISTANCE = 8.0
+local MIN_BEHIND_DISTANCE = 5.0
+local MAX_BEHIND_DISTANCE = 12.0
+local BEHIND_STEP = 0.50
 
 -- Search for a safer rear point around the Hunter.
 local REAR_ANGLE_OPTIONS = {
@@ -141,13 +142,23 @@ local DANGER_RADIUS = 10
 local DANGER_SWITCH_THRESHOLD = 3
 
 -- If player is hit, pause attacks briefly.
-local DAMAGE_EVADE_TIME = 0.28
+local DAMAGE_EVADE_TIME = 0.35
 
 -- After taking damage, favor the farthest safe rear point briefly.
-local DAMAGE_RETREAT_BONUS = 0.35
+local DAMAGE_RETREAT_BONUS = 1.50
 
 -- M1 timing.
-local ATTACK_INTERVAL = 0.20
+local ATTACK_INTERVAL = 0.44
+
+-- Blink into real server-side punch range only for this long.
+local ATTACK_HOLD_TIME = 0.030
+
+-- Adaptive strike reach. This is the distance used only at attack time.
+local STRIKE_DISTANCE = 3.15
+local MIN_STRIKE_DISTANCE = 2.40
+local MAX_STRIKE_DISTANCE = 5.50
+local STRIKE_RANGE_STEP_UP = 0.10
+local STRIKE_RANGE_STEP_DOWN = 0.18
 
 -- Follow target / reposition speed.
 local FOLLOW_INTERVAL = 0.03
@@ -170,31 +181,12 @@ local MONEY_SCAN_INTERVAL = 0.35
 local MONEY_TOUCH_COOLDOWN = 0.40
 
 --------------------------------------------------------------
--- BLOOD SETTINGS
---------------------------------------------------------------
-
-local AUTO_BLOOD = true
-
--- EXACT user-requested threshold.
-local BLOOD_TRIGGER = 0.25
-
--- Vampire Blood normally fills the bar.
-local BLOOD_RESUME = 0.90
-
-local BLOOD_CHECK_INTERVAL = 0.15
-local BLOOD_RETRY_DELAY = 2.5
-
-local POTION_WAIT_TIMEOUT = 5.0
-local BLOOD_FILL_TIMEOUT = 8.0
-local SHOP_SETTLE_TIME = 0.25
-
---------------------------------------------------------------
 -- STATE
 --------------------------------------------------------------
 
 local Enabled = false
 local Running = true
-local RefillingBlood = false
+local AutoRangeEnabled = true
 
 local CurrentTarget = nil
 
@@ -203,10 +195,10 @@ local LastTargetRecheck = 0
 local LastThreatRefresh = 0
 local LastEquipCheck = 0
 local LastMoneyScan = 0
-local LastBloodCheck = 0
-local LastBloodRefillAttempt = 0
+local LastCombatResolve = 0
 
-local LastKnownBlood = nil
+local HitSuccessStreak = 0
+local HitMissStreak = 0
 
 local LastPlayerHealth = nil
 local EvadeUntil = 0
@@ -901,838 +893,216 @@ local function ForceEquipFists()
 end
 
 --------------------------------------------------------------
--- ATTACK
+-- CURRENT GAME15 FISTS ATTACK
 --------------------------------------------------------------
 
-local function Attack(
-	Character,
-	Fists
-)
-	if not Character
-		or not Fists
-		or Fists.Parent ~= Character then
+local function FireAttack()
+	local Remote = CombatRemote
 
+	if not Remote
+		or not Remote.Parent then
+
+		Remote = ResolveCombatRemote()
+	end
+
+	if not Remote then
+		return false
+	end
+
+	return pcall(function()
+		Remote:FireServer("Attack")
+	end)
+end
+
+--------------------------------------------------------------
+-- ADAPTIVE RANGE
+--------------------------------------------------------------
+
+local function RegisterHitResult(HitLanded)
+	if not AutoRangeEnabled then
 		return
 	end
 
-	----------------------------------------------------------
-	-- Tool animation / normal activation
-	----------------------------------------------------------
+	if HitLanded then
+		HitSuccessStreak += 1
+		HitMissStreak = 0
 
-	pcall(function()
-		Fists:Activate()
-	end)
+		-- Slowly test farther reach only after repeated confirmed hits.
+		if HitSuccessStreak >= 3 then
+			STRIKE_DISTANCE =
+				math.min(
+					MAX_STRIKE_DISTANCE,
+					STRIKE_DISTANCE + STRIKE_RANGE_STEP_UP
+				)
 
-	----------------------------------------------------------
-	-- Original Fists remote
-	----------------------------------------------------------
+			HitSuccessStreak = 0
+		end
+	else
+		HitMissStreak += 1
+		HitSuccessStreak = 0
 
-	local FistRemote =
-		Fists:FindFirstChild(
-			"fistremote"
-		)
+		-- Two misses in a row -> move back inside reliable M1 range.
+		if HitMissStreak >= 2 then
+			STRIKE_DISTANCE =
+				math.max(
+					MIN_STRIKE_DISTANCE,
+					STRIKE_DISTANCE - STRIKE_RANGE_STEP_DOWN
+				)
 
-	if FistRemote
-		and FistRemote:IsA(
-			"RemoteEvent"
-		) then
-
-		pcall(function()
-			FistRemote:FireServer(
-				"lmb"
-			)
-		end)
-	end
-
-	----------------------------------------------------------
-	-- ArczisCombat M1
-	----------------------------------------------------------
-
-	local Timestamp =
-		workspace:GetServerTimeNow()
-
-	pcall(function()
-		CombatEvent:FireServer(
-			"M1",
-			Timestamp
-		)
-	end)
-end
-
---==============================================================
--- BLOOD DETECTION
---==============================================================
-
-local BLOOD_NAMES = {
-	"blood",
-	"bloodamount",
-	"vampireblood",
-	"bloodlevel",
-	"thirst"
-}
-
-local MAX_BLOOD_NAMES = {
-	"maxblood",
-	"bloodmax",
-	"maxbloodamount",
-	"maxvampireblood",
-	"maxthirst"
-}
-
-local function NameMatches(
-	Name,
-	List
-)
-	Name =
-		string.lower(Name)
-
-	for _, Target in ipairs(List) do
-		if Name == Target then
-			return true
+			HitMissStreak = 0
 		end
 	end
-
-	return false
 end
 
-local function BloodFromAttributes(
-	Object
+--------------------------------------------------------------
+-- BUILD STRIKE CFRAME FROM SAFE REAR CFRAME
+--------------------------------------------------------------
+
+local function GetStrikeCFrame(
+	Hunter,
+	Character,
+	Humanoid,
+	PlayerRoot,
+	SafeCFrame
 )
-	if not Object then
+	local HunterRoot = GetHunterRoot(Hunter)
+
+	if not HunterRoot
+		or not SafeCFrame then
+
 		return nil
 	end
 
-	local Current = nil
-	local Maximum = nil
+	local Direction =
+		SafeCFrame.Position
+		- HunterRoot.Position
 
-	for Name, Value in pairs(
-		Object:GetAttributes()
-	) do
-		if typeof(Value) == "number" then
-			if NameMatches(
-				Name,
-				BLOOD_NAMES
-			) then
+	Direction =
+		Vector3.new(
+			Direction.X,
+			0,
+			Direction.Z
+		)
 
-				Current = Value
-
-			elseif NameMatches(
-				Name,
-				MAX_BLOOD_NAMES
-			) then
-
-				Maximum = Value
-			end
-		end
-	end
-
-	if Current then
-		if Maximum
-			and Maximum > 0 then
-
-			return math.clamp(
-				Current / Maximum,
-				0,
-				1
+	if Direction.Magnitude < 0.01 then
+		Direction =
+			-HorizontalUnit(
+				HunterRoot.CFrame.LookVector
 			)
-		end
-
-		if Current >= 0
-			and Current <= 100 then
-
-			return Current / 100
-		end
+	else
+		Direction = Direction.Unit
 	end
 
-	return nil
-end
+	local Position =
+		HunterRoot.Position
+		+ Direction * STRIKE_DISTANCE
 
-local function BloodFromValues(
-	Root
-)
-	if not Root then
-		return nil
-	end
-
-	local Current = nil
-	local Maximum = nil
-
-	for _, Object in ipairs(
-		Root:GetDescendants()
-	) do
-		if Object:IsA("NumberValue")
-			or Object:IsA("IntValue") then
-
-			if NameMatches(
-				Object.Name,
-				BLOOD_NAMES
-			) then
-
-				Current = Object.Value
-
-			elseif NameMatches(
-				Object.Name,
-				MAX_BLOOD_NAMES
-			) then
-
-				Maximum = Object.Value
-			end
-		end
-	end
-
-	if Current then
-		if Maximum
-			and Maximum > 0 then
-
-			return math.clamp(
-				Current / Maximum,
-				0,
-				1
-			)
-		end
-
-		if Current >= 0
-			and Current <= 100 then
-
-			return Current / 100
-		end
-	end
-
-	return nil
-end
-
-local function IsRedGui(
-	Object
-)
-	local Color = nil
-
-	pcall(function()
-		if Object:IsA("ImageLabel")
-			or Object:IsA("ImageButton") then
-
-			Color =
-				Object.ImageColor3
-		else
-			Color =
-				Object.BackgroundColor3
-		end
-	end)
-
-	if not Color then
-		return false
-	end
+	Position =
+		GetGroundAdjustedPosition(
+			Position,
+			Character,
+			PlayerRoot,
+			Humanoid
+		)
 
 	return
-		Color.R > 0.45
-		and Color.R > Color.G * 1.5
-		and Color.R > Color.B * 1.3
-end
-
-local function BloodFromGUI()
-	local BestPercent = nil
-	local BestScore = -math.huge
-
-	for _, Object in ipairs(
-		PlayerGui:GetDescendants()
-	) do
-		-- Ignore this script's own GUI.
-		if FarmGUI
-			and Object:IsDescendantOf(
-				FarmGUI
-			) then
-
-			continue
-		end
-
-		if Object:IsA("GuiObject")
-			and Object.Visible then
-
-			local Name =
-				string.lower(
-					Object.Name
-				)
-
-			local Parent =
-				Object.Parent
-
-			local NamedBlood =
-				string.find(
-					Name,
-					"blood",
-					1,
-					true
-				) ~= nil
-
-			if Parent then
-				local ParentName =
-					string.lower(
-						Parent.Name
-					)
-
-				if string.find(
-					ParentName,
-					"blood",
-					1,
-					true
-				) then
-
-					NamedBlood = true
-				end
-			end
-
-			--------------------------------------------------
-			-- Text percentage / current-max
-			--------------------------------------------------
-
-			if NamedBlood
-				and (
-					Object:IsA("TextLabel")
-					or Object:IsA("TextButton")
-				) then
-
-				local Text =
-					tostring(Object.Text)
-
-				local Percent =
-					string.match(
-						Text,
-						"(%d+)%s*%%"
-					)
-
-				if Percent then
-					return
-						math.clamp(
-							tonumber(Percent)
-								/ 100,
-							0,
-							1
-						)
-				end
-
-				local Current,
-					Maximum =
-					string.match(
-						Text,
-						"(%d+)%s*/%s*(%d+)"
-					)
-
-				if Current
-					and Maximum
-					and tonumber(Maximum) > 0 then
-
-					return
-						math.clamp(
-							tonumber(Current)
-								/ tonumber(Maximum),
-							0,
-							1
-						)
-				end
-			end
-
-			--------------------------------------------------
-			-- Vertical red bar
-			--------------------------------------------------
-
-			if IsRedGui(Object)
-				and Parent
-				and Parent:IsA("GuiObject") then
-
-				local Width =
-					Object.AbsoluteSize.X
-
-				local Height =
-					Object.AbsoluteSize.Y
-
-				local ParentHeight =
-					Parent.AbsoluteSize.Y
-
-				if Height > 5
-					and ParentHeight > 10
-					and Height > Width * 1.5 then
-
-					local Ratio =
-						Height
-						/ ParentHeight
-
-					if Ratio > 0
-						and Ratio <= 1.05 then
-
-						Ratio =
-							math.clamp(
-								Ratio,
-								0,
-								1
-							)
-
-						local Score =
-							Height
-
-						if NamedBlood then
-							Score += 100
-						end
-
-						if Width < 80 then
-							Score += 30
-						end
-
-						if Score > BestScore then
-							BestScore = Score
-							BestPercent = Ratio
-						end
-					end
-				end
-			end
-
-			--------------------------------------------------
-			-- Scale-based vertical fill
-			--------------------------------------------------
-
-			if IsRedGui(Object) then
-				local YScale =
-					Object.Size.Y.Scale
-
-				if YScale > 0
-					and YScale <= 1 then
-
-					local Width =
-						Object.AbsoluteSize.X
-
-					local Height =
-						Object.AbsoluteSize.Y
-
-					if Height > Width * 1.5 then
-						local Score =
-							Height
-
-						if NamedBlood then
-							Score += 100
-						end
-
-						if Score > BestScore then
-							BestScore = Score
-							BestPercent = YScale
-						end
-					end
-				end
-			end
-		end
-	end
-
-	return BestPercent
-end
-
-local function GetBloodPercent()
-	local Character,
-		Humanoid =
-		GetCharacter()
-
-	----------------------------------------------------------
-	-- Attributes
-	----------------------------------------------------------
-
-	for _, Object in ipairs({
-		Player,
-		Character,
-		Humanoid
-	}) do
-		local Percent =
-			BloodFromAttributes(
-				Object
-			)
-
-		if Percent then
-			LastKnownBlood = Percent
-			return Percent
-		end
-	end
-
-	----------------------------------------------------------
-	-- NumberValues
-	----------------------------------------------------------
-
-	for _, Object in ipairs({
-		Player,
-		Character
-	}) do
-		local Percent =
-			BloodFromValues(
-				Object
-			)
-
-		if Percent then
-			LastKnownBlood = Percent
-			return Percent
-		end
-	end
-
-	----------------------------------------------------------
-	-- GUI fallback
-	----------------------------------------------------------
-
-	local Percent =
-		BloodFromGUI()
-
-	if Percent then
-		LastKnownBlood = Percent
-		return Percent
-	end
-
-	return LastKnownBlood
-end
-
---==============================================================
--- AUTO BLOOD REFILL
---==============================================================
-
-local function GetVampireMerchant()
-	----------------------------------------------------------
-	-- Known map path
-	----------------------------------------------------------
-
-	local Mapa =
-		workspace:FindFirstChild(
-			"Mapa"
+		CFrame.lookAt(
+			Position,
+			HunterRoot.Position
 		)
-
-	if Mapa then
-		local Cidade =
-			Mapa:FindFirstChild(
-				"CIDADE"
-			)
-
-		if Cidade then
-			local Merchant =
-				Cidade:FindFirstChild(
-					"ShopKeeper2"
-				)
-
-			if Merchant then
-				return Merchant
-			end
-		end
-	end
-
-	----------------------------------------------------------
-	-- Fallback
-	----------------------------------------------------------
-
-	for _, Object in ipairs(
-		workspace:GetDescendants()
-	) do
-		if Object:IsA("Model")
-			and Object.Name == "ShopKeeper2" then
-
-			return Object
-		end
-	end
-
-	return nil
 end
 
-local function GetMerchantRoot(
-	Merchant
+--------------------------------------------------------------
+-- SAFE LONG-REACH STRIKE
+--------------------------------------------------------------
+
+local function PerformSafeStrike(
+	Character,
+	Humanoid,
+	PlayerRoot,
+	Hunter,
+	SafeCFrame
 )
-	if not Merchant then
-		return nil
-	end
-
-	return
-		Merchant:FindFirstChild("HumanoidRootPart")
-		or Merchant:FindFirstChild("Torso")
-		or Merchant:FindFirstChild("UpperTorso")
-		or Merchant.PrimaryPart
-end
-
-local function FindVampireBlood()
-	local Character =
-		Player.Character
-
-	if Character then
-		local Potion =
-			Character:FindFirstChild(
-				"Vampire Blood"
-			)
-
-		if Potion then
-			return Potion
-		end
-	end
-
-	local Backpack =
-		Player:FindFirstChild(
-			"Backpack"
-		)
-
-	if Backpack then
-		local Potion =
-			Backpack:FindFirstChild(
-				"Vampire Blood"
-			)
-
-		if Potion then
-			return Potion
-		end
-	end
-
-	return nil
-end
-
-local function WaitForVampireBlood(
-	Timeout
-)
-	local Start =
-		os.clock()
-
-	repeat
-		local Potion =
-			FindVampireBlood()
-
-		if Potion then
-			return Potion
-		end
-
-		task.wait(0.05)
-
-	until
-		os.clock() - Start
-		>= Timeout
-
-	return nil
-end
-
-local function StopDrinkEmote()
-	pcall(function()
-		PlayEmoteSound:FireServer(
-			"Stop"
-		)
-	end)
-end
-
-local function ReturnToFarm(
-	FallbackCFrame
-)
-	local Character,
-		Humanoid,
-		Root =
-		WaitForCharacterReady()
-
-	local ReturnCFrame =
-		nil
-
-	if CurrentTarget
-		and IsValidHunter(
-			CurrentTarget
-		) then
-
-		ReturnCFrame =
-			select(
-				1,
-				GetSafestRearCFrame(
-					CurrentTarget,
-					Character,
-					Humanoid,
-					Root
-				)
-			)
-	end
-
-	ReturnCFrame =
-		ReturnCFrame
-		or FallbackCFrame
-
-	if Root
-		and ReturnCFrame then
-
-		SetCharacterCFrame(
-			Root,
-			ReturnCFrame
-		)
-	end
-
-	task.wait(0.12)
-
-	if Enabled then
-		ForceEquipFists()
-	end
-end
-
-local function RefillVampireBlood()
-	if RefillingBlood then
-		return false
-	end
-
-	RefillingBlood = true
-
-	local Character,
-		Humanoid,
-		Root =
-		WaitForCharacterReady()
-
-	if not Character
+	if not IsValidHunter(Hunter)
+		or not Character
 		or not Humanoid
-		or not Root
-		or Humanoid.Health <= 0 then
+		or not PlayerRoot
+		or not SafeCFrame then
 
-		RefillingBlood = false
 		return false
 	end
 
-	local FallbackReturnCFrame =
-		Root.CFrame
-
-	----------------------------------------------------------
-	-- Stop fighting
-	----------------------------------------------------------
-
-	pcall(function()
-		Humanoid:UnequipTools()
-	end)
-
-	----------------------------------------------------------
-	-- Merchant
-	----------------------------------------------------------
-
-	local Merchant =
-		GetVampireMerchant()
-
-	local MerchantRoot =
-		GetMerchantRoot(
-			Merchant
+	local Fists =
+		EquipFists(
+			Character,
+			Humanoid
 		)
 
-	if not MerchantRoot then
-		warn(
-			"[AUTO BLOOD] ShopKeeper2 not found"
-		)
-
-		ReturnToFarm(
-			FallbackReturnCFrame
-		)
-
-		RefillingBlood = false
+	if not Fists then
 		return false
 	end
 
-	----------------------------------------------------------
-	-- Teleport in front of merchant
-	----------------------------------------------------------
-
-	local ShopCFrame =
-		MerchantRoot.CFrame
-		* CFrame.new(
-			0,
-			0,
-			-4
+	local StrikeCFrame =
+		GetStrikeCFrame(
+			Hunter,
+			Character,
+			Humanoid,
+			PlayerRoot,
+			SafeCFrame
 		)
 
+	if not StrikeCFrame then
+		return false
+	end
+
+	local HunterHumanoid =
+		Hunter:FindFirstChildOfClass("Humanoid")
+
+	local HPBefore =
+		HunterHumanoid
+		and HunterHumanoid.Health
+		or nil
+
+	-- Only enter the real M1 range for the attack packet.
 	SetCharacterCFrame(
-		Root,
-		ShopCFrame
+		PlayerRoot,
+		StrikeCFrame
 	)
 
-	task.wait(
-		SHOP_SETTLE_TIME
-	)
+	local Sent = FireAttack()
 
-	----------------------------------------------------------
-	-- Existing potion?
-	----------------------------------------------------------
+	task.wait(ATTACK_HOLD_TIME)
 
-	local Potion =
-		FindVampireBlood()
-
-	if not Potion then
-		------------------------------------------------------
-		-- Buy directly, no shop GUI.
-		------------------------------------------------------
-
-		pcall(function()
-			ShopRemote:FireServer(
-				"Purchase",
-				"Vampire Blood"
-			)
-		end)
-
-		Potion =
-			WaitForVampireBlood(
-				POTION_WAIT_TIMEOUT
-			)
+	-- Immediately leave NPC melee range again.
+	if PlayerRoot.Parent then
+		SetCharacterCFrame(
+			PlayerRoot,
+			SafeCFrame
+		)
 	end
 
-	if not Potion then
-		warn(
-			"[AUTO BLOOD] Vampire Blood purchase failed"
-		)
+	-- Check a little later whether the target actually lost HP.
+	if Sent
+		and HPBefore
+		and HunterHumanoid then
 
-		ReturnToFarm(
-			FallbackReturnCFrame
-		)
+		task.delay(
+			0.16,
+			function()
+				if HunterHumanoid.Parent
+					and HunterHumanoid.Health > 0 then
 
-		RefillingBlood = false
-		return false
+					RegisterHitResult(
+						HunterHumanoid.Health < HPBefore
+					)
+				elseif HunterHumanoid.Health <= 0 then
+					RegisterHitResult(true)
+				end
+			end
+		)
 	end
 
-	----------------------------------------------------------
-	-- Equip potion
-	----------------------------------------------------------
-
-	pcall(function()
-		Humanoid:EquipTool(
-			Potion
-		)
-	end)
-
-	task.wait(0.10)
-
-	Potion =
-		FindVampireBlood()
-		or Potion
-
-	----------------------------------------------------------
-	-- Drink
-	----------------------------------------------------------
-
-	pcall(function()
-		DrinkPotionRemote:FireServer(
-			Potion
-		)
-	end)
-
-	----------------------------------------------------------
-	-- Wait for blood
-	----------------------------------------------------------
-
-	local FillStart =
-		os.clock()
-
-	repeat
-		task.wait(0.10)
-
-		local Blood =
-			GetBloodPercent()
-
-		if Blood
-			and Blood >= BLOOD_RESUME then
-
-			break
-		end
-
-	until
-		os.clock() - FillStart
-		>= BLOOD_FILL_TIMEOUT
-
-	StopDrinkEmote()
-
-	task.wait(0.08)
-
-	ReturnToFarm(
-		FallbackReturnCFrame
-	)
-
-	RefillingBlood = false
-
-	return true
+	return Sent
 end
 
 --==============================================================
@@ -1822,8 +1192,7 @@ local function CollectBag(
 end
 
 local function CollectMoney()
-	if not AUTO_MONEY
-		or RefillingBlood then
+	if not AUTO_MONEY then
 
 		return 0
 	end
@@ -1985,7 +1354,7 @@ Title.Position =
 	)
 
 Title.BackgroundTransparency = 1
-Title.Text = "Auto Hunter Safe Farm"
+Title.Text = "Auto Hunter Long Reach"
 Title.TextColor3 = Color3.new(1, 1, 1)
 Title.Font = Enum.Font.GothamBold
 Title.TextSize = 20
@@ -2170,7 +1539,7 @@ DistanceTitle.Position =
 	)
 
 DistanceTitle.BackgroundTransparency = 1
-DistanceTitle.Text = "Safe Behind Distance"
+DistanceTitle.Text = "Safe Distance"
 DistanceTitle.TextColor3 = Color3.new(1, 1, 1)
 DistanceTitle.Font = Enum.Font.GothamBold
 DistanceTitle.TextSize = 15
@@ -2258,13 +1627,13 @@ Instance.new(
 	UDim.new(0, 8)
 
 --------------------------------------------------------------
--- AUTO BLOOD / MONEY
+-- AUTO RANGE / MONEY
 --------------------------------------------------------------
 
-local BloodButton =
+local RangeButton =
 	Instance.new("TextButton")
 
-BloodButton.Size =
+RangeButton.Size =
 	UDim2.new(
 		0.5,
 		-24,
@@ -2272,20 +1641,20 @@ BloodButton.Size =
 		42
 	)
 
-BloodButton.Position =
+RangeButton.Position =
 	UDim2.fromOffset(
 		18,
 		284
 	)
 
-BloodButton.TextColor3 = Color3.new(1, 1, 1)
-BloodButton.Font = Enum.Font.GothamBold
-BloodButton.TextSize = 14
-BloodButton.Parent = Frame
+RangeButton.TextColor3 = Color3.new(1, 1, 1)
+RangeButton.Font = Enum.Font.GothamBold
+RangeButton.TextSize = 14
+RangeButton.Parent = Frame
 
 Instance.new(
 	"UICorner",
-	BloodButton
+	RangeButton
 ).CornerRadius =
 	UDim.new(0, 9)
 
@@ -2320,13 +1689,13 @@ Instance.new(
 	UDim.new(0, 9)
 
 --------------------------------------------------------------
--- BLOOD STATUS
+-- RANGE / COMBAT STATUS
 --------------------------------------------------------------
 
-local BloodStatus =
+local CombatStatus =
 	Instance.new("TextLabel")
 
-BloodStatus.Size =
+CombatStatus.Size =
 	UDim2.new(
 		1,
 		-20,
@@ -2334,18 +1703,18 @@ BloodStatus.Size =
 		27
 	)
 
-BloodStatus.Position =
+CombatStatus.Position =
 	UDim2.fromOffset(
 		10,
 		338
 	)
 
-BloodStatus.BackgroundTransparency = 1
-BloodStatus.Text = "Blood: detecting..."
-BloodStatus.TextColor3 = Color3.fromRGB(220, 120, 120)
-BloodStatus.Font = Enum.Font.GothamBold
-BloodStatus.TextSize = 13
-BloodStatus.Parent = Frame
+CombatStatus.BackgroundTransparency = 1
+CombatStatus.Text = "CombatRemote: checking..."
+CombatStatus.TextColor3 = Color3.fromRGB(120, 200, 235)
+CombatStatus.Font = Enum.Font.GothamBold
+CombatStatus.TextSize = 13
+CombatStatus.Parent = Frame
 
 --------------------------------------------------------------
 -- SAFETY STATUS
@@ -2459,26 +1828,40 @@ local function UpdateGUI()
 			BEHIND_DISTANCE
 		)
 
-	if AUTO_BLOOD then
-		BloodButton.Text =
-			"AUTO BLOOD : ON"
+	if AutoRangeEnabled then
+		RangeButton.Text =
+			"AUTO RANGE : ON"
 
-		BloodButton.BackgroundColor3 =
+		RangeButton.BackgroundColor3 =
 			Color3.fromRGB(
-				150,
-				45,
-				55
+				55,
+				125,
+				180
 			)
 	else
-		BloodButton.Text =
-			"AUTO BLOOD : OFF"
+		RangeButton.Text =
+			"AUTO RANGE : OFF"
 
-		BloodButton.BackgroundColor3 =
+		RangeButton.BackgroundColor3 =
 			Color3.fromRGB(
 				65,
 				65,
 				75
 			)
+	end
+
+	if CombatRemote
+		and CombatRemote.Parent then
+
+		CombatStatus.Text =
+			string.format(
+				"Remote READY | Strike %.2f | Safe %.1f",
+				STRIKE_DISTANCE,
+				BEHIND_DISTANCE
+			)
+	else
+		CombatStatus.Text =
+			"CombatRemote: NOT FOUND"
 	end
 
 	if AUTO_MONEY then
@@ -2530,6 +1913,8 @@ Toggle.MouseButton1Click:Connect(
 		LastTargetRecheck = 0
 
 		if Enabled then
+			ResolveCombatRemote()
+
 			Status.Text =
 				"Equipping Fists..."
 
@@ -2579,10 +1964,13 @@ DistanceMinus.MouseButton1Click:Connect(
 	end
 )
 
-BloodButton.MouseButton1Click:Connect(
+RangeButton.MouseButton1Click:Connect(
 	function()
-		AUTO_BLOOD =
-			not AUTO_BLOOD
+		AutoRangeEnabled =
+			not AutoRangeEnabled
+
+		HitSuccessStreak = 0
+		HitMissStreak = 0
 
 		UpdateGUI()
 	end
@@ -2731,70 +2119,27 @@ task.spawn(function()
 end)
 
 --==============================================================
--- BLOOD LOOP
+-- COMBAT REMOTE RESOLVE LOOP
 --==============================================================
 
 task.spawn(function()
 	while Running
 		and GUI.Parent do
 
-		if Enabled
-			and AUTO_BLOOD
-			and not RefillingBlood then
+		local Now = os.clock()
 
-			local Now =
-				os.clock()
+		if (
+			not CombatRemote
+			or not CombatRemote.Parent
+		)
+			and Now - LastCombatResolve >= 1.0 then
 
-			if Now - LastBloodCheck
-				>= BLOOD_CHECK_INTERVAL then
-
-				LastBloodCheck = Now
-
-				local Blood =
-					GetBloodPercent()
-
-				if Blood then
-					BloodStatus.Text =
-						string.format(
-							"Blood: %.0f%%",
-							Blood * 100
-						)
-
-					if Blood <= BLOOD_TRIGGER
-						and Now
-							- LastBloodRefillAttempt
-							>= BLOOD_RETRY_DELAY then
-
-						LastBloodRefillAttempt =
-							Now
-
-						Status.Text =
-							"Blood low - buying Vampire Blood..."
-
-						RefillVampireBlood()
-
-						local NewBlood =
-							GetBloodPercent()
-
-						if NewBlood then
-							BloodStatus.Text =
-								string.format(
-									"Blood: %.0f%%",
-									NewBlood * 100
-								)
-						end
-
-						Status.Text =
-							"Blood refilled - resuming farm"
-					end
-				else
-					BloodStatus.Text =
-						"Blood: detecting..."
-				end
-			end
+			LastCombatResolve = Now
+			ResolveCombatRemote()
+			UpdateGUI()
 		end
 
-		task.wait(0.05)
+		task.wait(0.25)
 	end
 end)
 
@@ -2807,8 +2152,7 @@ task.spawn(function()
 		and GUI.Parent do
 
 		if Enabled
-			and AUTO_MONEY
-			and not RefillingBlood then
+			and AUTO_MONEY then
 
 			local Now =
 				os.clock()
@@ -2834,8 +2178,7 @@ task.spawn(function()
 	while Running
 		and GUI.Parent do
 
-		if Enabled
-			and not RefillingBlood then
+		if Enabled then
 
 			local Character,
 				Humanoid,
@@ -3025,22 +2368,25 @@ task.spawn(function()
 				------------------------------------------------
 
 				if Now >= EvadeUntil then
-					local Fists =
-						EquipFists(
-							Character,
-							Humanoid
-						)
-
-					if Fists
-						and Now - LastAttack
-							>= ATTACK_INTERVAL then
+					if Now - LastAttack
+						>= ATTACK_INTERVAL then
 
 						LastAttack = Now
 
-						Attack(
-							Character,
-							Fists
-						)
+						local Sent =
+							PerformSafeStrike(
+								Character,
+								Humanoid,
+								PlayerRoot,
+								CurrentTarget,
+								SafeCFrame
+							)
+
+						if not Sent then
+							ResolveCombatRemote()
+						end
+
+						UpdateGUI()
 					end
 				else
 					Status.Text =
@@ -3127,7 +2473,6 @@ end
 local function Stop()
 	Running = false
 	Enabled = false
-	RefillingBlood = false
 
 	if HealthConnection then
 		pcall(function()
@@ -3142,7 +2487,7 @@ local function Stop()
 	end
 
 	print(
-		"[Auto Hunter Safe Farm] stopped"
+		"[Auto Hunter Long Reach] stopped"
 	)
 end
 
@@ -3175,8 +2520,10 @@ print(" - retreats briefly after taking damage")
 print(" - switches away from crowded targets")
 print("")
 print("Auto Fists: ON with Auto Hunter")
-print("Auto Blood trigger: <= 25%")
+print("Auto Blood: REMOVED")
 print("Auto Money: ON")
-print("Behind Distance:", BEHIND_DISTANCE)
+print("Safe Distance:", BEHIND_DISTANCE)
+print("Strike Distance:", STRIKE_DISTANCE)
+print("Auto Range:", AutoRangeEnabled)
 print("Danger Radius:", DANGER_RADIUS)
 print("================================================")
