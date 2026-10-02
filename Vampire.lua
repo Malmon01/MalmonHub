@@ -86,6 +86,17 @@ local function GetCharacter()
 	return c, c:FindFirstChildOfClass("Humanoid"), c:FindFirstChild("HumanoidRootPart")
 end
 
+local function SetCharacterCFrame(root, cf)
+	if not root or not root.Parent or not cf then
+		return false
+	end
+
+	root.CFrame = cf
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	return true
+end
+
 local function GetHunterRoot(h)
 	if not h then return nil end
 	return h:FindFirstChild("HumanoidRootPart")
