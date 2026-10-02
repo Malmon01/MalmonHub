@@ -1,17 +1,23 @@
 --============================================================
--- AUTO HUNTER LONG-REACH SAFE FARM
+-- AUTO HUNTER REAR REACH FARM
 -- Standalone GitHub / loadstring version
 --
--- NO Auto Blood. NO NPC freeze/move.
--- Uses the current Game15Fists CombatRemote:
---   CombatRemote:FireServer("Attack")
+-- New approach:
+--   • NO freeze
+--   • NO moving NPCs
+--   • NO blink in/out for every punch
+--   • Player stays behind the real Hunter continuously
+--   • Combat uses the NEW Game15Fists CombatRemote:
+--       CombatRemote:FireServer("Attack")
+--   • AUTO RANGE learns the farthest distance that still damages
+--     the target, then keeps the player there.
+--   • Auto Money remains available.
+--   • Auto Blood removed completely.
 --
--- Safe-strike flow:
---   stay far behind Hunter -> lock-on inside valid M1 range for a few frames
---   -> send Attack -> keep tracking briefly -> return to fresh safe position
---
--- AUTO RANGE gradually searches for the farthest strike distance
--- that still causes damage, then backs off if hits stop landing.
+-- Hunter levels:
+--   100-300
+--   400-900
+--   1000-3000
 --============================================================
 
 --------------------------------------------------------------
@@ -21,13 +27,12 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
 
 local Player = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
 
 --------------------------------------------------------------
--- CLEAN PREVIOUS VERSION
+-- CLEAN OLD VERSION
 --------------------------------------------------------------
 
 local ENV = _G
@@ -43,7 +48,6 @@ if ENV.AutoHunterFarmStop then
 end
 
 local OldGUI = PlayerGui:FindFirstChild("AutoHunterFarmGUI")
-
 if OldGUI then
 	OldGUI:Destroy()
 end
@@ -52,11 +56,14 @@ end
 -- GAME OBJECTS
 --------------------------------------------------------------
 
-local NPCS = workspace:WaitForChild("NPCS")
-local HUNTERS = NPCS:WaitForChild("HUNTERS")
+local NPCS = workspace:FindFirstChild("NPCS")
+local HUNTERS = NPCS and NPCS:FindFirstChild("HUNTERS")
 local DROPPED_MONEY = workspace:FindFirstChild("DroppedMoney")
 
--- Current combat system. Never WaitForChild forever here.
+--------------------------------------------------------------
+-- NEW COMBAT REMOTE
+--------------------------------------------------------------
+
 local CombatRemote = nil
 
 local function ResolveCombatRemote()
@@ -65,17 +72,23 @@ local function ResolveCombatRemote()
 			"Fun\195\167\195\181es"
 		)
 
+	if not Funcoes then
+		CombatRemote = nil
+		return nil
+	end
+
 	local Game15Fists =
-		Funcoes
-		and Funcoes:FindFirstChild("Game15Fists")
+		Funcoes:FindFirstChild("Game15Fists")
+
+	if not Game15Fists then
+		CombatRemote = nil
+		return nil
+	end
 
 	local Remote =
-		Game15Fists
-		and Game15Fists:FindFirstChild("CombatRemote")
+		Game15Fists:FindFirstChild("CombatRemote")
 
-	if Remote
-		and Remote:IsA("RemoteEvent") then
-
+	if Remote and Remote:IsA("RemoteEvent") then
 		CombatRemote = Remote
 		return Remote
 	end
@@ -111,73 +124,55 @@ local LEVEL_PRESETS = {
 local SelectedPreset = 1
 
 --------------------------------------------------------------
--- SAFE FARM SETTINGS
+-- REAR FARM SETTINGS
 --------------------------------------------------------------
 
--- Stay close enough for the game's real M1 distance check.
-local BEHIND_DISTANCE = 7.0
-local MIN_BEHIND_DISTANCE = 5.0
-local MAX_BEHIND_DISTANCE = 12.0
-local BEHIND_STEP = 0.50
+-- Start here. Auto Range can move this farther/closer.
+local ATTACK_DISTANCE = 3.80
 
--- Search for a safer rear point around the Hunter.
-local REAR_ANGLE_OPTIONS = {
-	-28,
-	-18,
-	-9,
-	0,
-	9,
-	18,
-	28
-}
+-- Never go closer/farther than these values.
+local MIN_ATTACK_DISTANCE = 2.55
+local MAX_ATTACK_DISTANCE = 5.50
 
-local REAR_DISTANCE_OPTIONS = {
-	-0.30,
-	0,
-	0.30
-}
+-- Manual +/- adjustment.
+local MANUAL_DISTANCE_STEP = 0.15
 
--- Other NPCs inside this radius make a Hunter less desirable.
-local DANGER_RADIUS = 10
-local DANGER_SWITCH_THRESHOLD = 3
+-- Auto Range adjustments.
+local AUTO_RANGE = true
+local AUTO_RANGE_UP_STEP = 0.10
+local AUTO_RANGE_DOWN_STEP = 0.20
 
--- If player is hit, pause attacks briefly.
-local DAMAGE_EVADE_TIME = 0.35
+-- Number of confirmed hits before testing a slightly farther distance.
+local HITS_BEFORE_RANGE_UP = 5
 
--- After taking damage, favor the farthest safe rear point briefly.
-local DAMAGE_RETREAT_BONUS = 1.50
+-- Number of attack attempts with no HP decrease before moving closer.
+local MISSES_BEFORE_RANGE_DOWN = 3
 
--- M1 timing.
-local ATTACK_INTERVAL = 0.46
+-- New combat reports M1 duration around 0.42 sec.
+local ATTACK_INTERVAL = 0.44
 
--- Give character-position replication a short head start before the
--- attack packet reaches the server. While this window is active we
--- continuously re-lock behind the moving Hunter.
-local STRIKE_PREP_TIME = 0.070
-local STRIKE_TRACK_AFTER_ATTACK = 0.075
+-- How quickly player keeps itself behind the moving Hunter.
+local FOLLOW_INTERVAL = 0.018
 
--- Lead the target slightly using its real AssemblyLinearVelocity.
--- This matters most when a Hunter is sprinting away.
-local TARGET_LEAD_TIME = 0.055
-
--- Adaptive strike reach. This is the distance used only at attack time.
-local STRIKE_DISTANCE = 3.15
-local MIN_STRIKE_DISTANCE = 2.40
-local MAX_STRIKE_DISTANCE = 5.50
-local STRIKE_RANGE_STEP_UP = 0.10
-local STRIKE_RANGE_STEP_DOWN = 0.18
-
--- Follow target / reposition speed.
-local FOLLOW_INTERVAL = 0.02
-
--- How often we reconsider the safest Hunter.
-local TARGET_RECHECK_INTERVAL = 0.45
-
--- Threat cache refresh.
-local THREAT_REFRESH_INTERVAL = 0.40
+-- Re-evaluate target.
+local TARGET_RECHECK_INTERVAL = 0.40
 
 -- Keep Fists equipped.
 local EQUIP_CHECK_INTERVAL = 0.18
+
+--------------------------------------------------------------
+-- SAFETY SETTINGS
+--------------------------------------------------------------
+
+-- Prefer Hunter with fewer other Hunters nearby.
+local DANGER_RADIUS = 10.0
+
+-- Target switch only when current target is crowded.
+local DANGER_SWITCH_THRESHOLD = 3
+
+-- If player takes damage, briefly move a little farther away.
+local DAMAGE_EVADE_TIME = 0.30
+local DAMAGE_DISTANCE_BONUS = 0.80
 
 --------------------------------------------------------------
 -- MONEY SETTINGS
@@ -193,25 +188,21 @@ local MONEY_TOUCH_COOLDOWN = 0.40
 
 local Enabled = false
 local Running = true
-local AutoRangeEnabled = true
 
 local CurrentTarget = nil
 
 local LastAttack = 0
 local LastTargetRecheck = 0
-local LastThreatRefresh = 0
 local LastEquipCheck = 0
 local LastMoneyScan = 0
 local LastCombatResolve = 0
 
-local HitSuccessStreak = 0
-local HitMissStreak = 0
-
-local LastPlayerHealth = nil
 local EvadeUntil = 0
+local LastPlayerHealth = nil
 
-local ThreatCache = {}
-local CurrentThreatCount = 0
+local LastTargetHealth = nil
+local AttackAttemptsWithoutDamage = 0
+local ConfirmedHitStreak = 0
 
 local MoneyAttempt =
 	setmetatable(
@@ -220,8 +211,6 @@ local MoneyAttempt =
 			__mode = "k"
 		}
 	)
-
-local FarmGUI = nil
 
 --------------------------------------------------------------
 -- CHARACTER HELPERS
@@ -241,30 +230,7 @@ local function GetCharacter()
 	return Character, Humanoid, Root
 end
 
-local function WaitForCharacterReady()
-	local Character =
-		Player.Character
-		or Player.CharacterAdded:Wait()
-
-	local Humanoid =
-		Character:WaitForChild(
-			"Humanoid",
-			10
-		)
-
-	local Root =
-		Character:WaitForChild(
-			"HumanoidRootPart",
-			10
-		)
-
-	return Character, Humanoid, Root
-end
-
-local function SetCharacterCFrame(
-	Root,
-	CFrameValue
-)
+local function SetCharacterCFrame(Root, CFrameValue)
 	if not Root
 		or not Root.Parent then
 		return
@@ -284,34 +250,34 @@ local function HorizontalUnit(Vector)
 		)
 
 	if Flat.Magnitude < 0.001 then
-		return Vector3.new(
-			0,
-			0,
-			-1
-		)
+		return Vector3.new(0, 0, -1)
 	end
 
 	return Flat.Unit
 end
 
 --------------------------------------------------------------
--- HUNTER HELPERS
+-- MODEL / HUNTER HELPERS
 --------------------------------------------------------------
 
-local function GetHunterRoot(Hunter)
-	if not Hunter then
+local function GetModelRoot(Model)
+	if not Model then
 		return nil
 	end
 
 	return
-		Hunter:FindFirstChild("HumanoidRootPart")
-		or Hunter:FindFirstChild("UpperTorso")
-		or Hunter:FindFirstChild("Torso")
-		or Hunter.PrimaryPart
+		Model:FindFirstChild("HumanoidRootPart")
+		or Model:FindFirstChild("UpperTorso")
+		or Model:FindFirstChild("Torso")
+		or Model.PrimaryPart
+end
+
+local function GetHunterRoot(Hunter)
+	return GetModelRoot(Hunter)
 end
 
 --------------------------------------------------------------
--- READ HUNTER LEVEL
+-- HUNTER LEVEL
 --------------------------------------------------------------
 
 local function GetHunterLevel(Hunter)
@@ -329,15 +295,13 @@ local function GetHunterLevel(Hunter)
 		"level",
 		"lvl"
 	}) do
-		local Value =
-			Hunter:GetAttribute(Name)
+		local Value = Hunter:GetAttribute(Name)
 
 		if typeof(Value) == "number" then
 			return math.floor(Value)
 
 		elseif typeof(Value) == "string" then
-			local Number =
-				tonumber(Value)
+			local Number = tonumber(Value)
 
 			if Number then
 				return math.floor(Number)
@@ -349,18 +313,15 @@ local function GetHunterLevel(Hunter)
 	-- Value objects
 	----------------------------------------------------------
 
-	for _, Object in ipairs(
-		Hunter:GetDescendants()
-	) do
+	for _, Object in ipairs(Hunter:GetDescendants()) do
 		if Object:IsA("IntValue")
 			or Object:IsA("NumberValue")
 			or Object:IsA("StringValue") then
 
-			local LowerName =
-				string.lower(Object.Name)
+			local Name = string.lower(Object.Name)
 
-			if LowerName == "level"
-				or LowerName == "lvl" then
+			if Name == "level"
+				or Name == "lvl" then
 
 				local Number =
 					tonumber(Object.Value)
@@ -373,17 +334,14 @@ local function GetHunterLevel(Hunter)
 	end
 
 	----------------------------------------------------------
-	-- Overhead text: Hunter Lv 165 / Hunter Lv 2536
+	-- Text above head
 	----------------------------------------------------------
 
-	for _, Object in ipairs(
-		Hunter:GetDescendants()
-	) do
+	for _, Object in ipairs(Hunter:GetDescendants()) do
 		if Object:IsA("TextLabel")
 			or Object:IsA("TextButton") then
 
-			local Text =
-				tostring(Object.Text)
+			local Text = tostring(Object.Text)
 
 			local Level =
 				string.match(
@@ -414,9 +372,7 @@ end
 
 local function IsCorrectLevel(Hunter)
 	local Preset =
-		LEVEL_PRESETS[
-			SelectedPreset
-		]
+		LEVEL_PRESETS[SelectedPreset]
 
 	local Level =
 		GetHunterLevel(Hunter)
@@ -433,19 +389,16 @@ end
 local function IsValidHunter(Hunter)
 	if not Hunter
 		or not Hunter:IsA("Model") then
-
 		return false
 	end
 
-	-- Exact Hunter only. HunterBow is ignored.
+	-- Hunter only; HunterBow ignored.
 	if Hunter.Name ~= "Hunter" then
 		return false
 	end
 
 	local Humanoid =
-		Hunter:FindFirstChildOfClass(
-			"Humanoid"
-		)
+		Hunter:FindFirstChildOfClass("Humanoid")
 
 	local Root =
 		GetHunterRoot(Hunter)
@@ -453,7 +406,6 @@ local function IsValidHunter(Hunter)
 	if not Humanoid
 		or Humanoid.Health <= 0
 		or not Root then
-
 		return false
 	end
 
@@ -461,71 +413,52 @@ local function IsValidHunter(Hunter)
 end
 
 --------------------------------------------------------------
--- THREAT CACHE
+-- THREAT COUNT
 --------------------------------------------------------------
 
-local function RefreshThreatCache()
-	local NewCache = {}
-
-	-- A threat is any living NPC model under Workspace.NPCS.
-	for _, Object in ipairs(
-		NPCS:GetDescendants()
-	) do
-		if Object:IsA("Model") then
-			local Humanoid =
-				Object:FindFirstChildOfClass(
-					"Humanoid"
-				)
-
-			local Root =
-				GetHunterRoot(Object)
-
-			if Humanoid
-				and Humanoid.Health > 0
-				and Root
-				and Root:IsA("BasePart") then
-
-				NewCache[#NewCache + 1] = {
-					Model = Object,
-					Humanoid = Humanoid,
-					Root = Root
-				}
-			end
-		end
-	end
-
-	ThreatCache = NewCache
-end
-
-local function CountThreatsAroundPosition(
+local function CountNearbyHunters(
 	Position,
-	ExcludeModel,
+	ExcludeHunter,
 	Radius
 )
+	if not HUNTERS then
+		return 0, math.huge
+	end
+
 	local Count = 0
 	local Nearest = math.huge
 
-	for _, Threat in ipairs(
-		ThreatCache
-	) do
-		if Threat.Model ~= ExcludeModel
-			and Threat.Humanoid
-			and Threat.Humanoid.Health > 0
-			and Threat.Root
-			and Threat.Root.Parent then
+	for _, Hunter in ipairs(HUNTERS:GetChildren()) do
+		if Hunter ~= ExcludeHunter
+			and Hunter:IsA("Model")
+			and (
+				Hunter.Name == "Hunter"
+				or Hunter.Name == "HunterBow"
+			) then
 
-			local Distance =
-				(
-					Threat.Root.Position
-					- Position
-				).Magnitude
+			local Humanoid =
+				Hunter:FindFirstChildOfClass("Humanoid")
 
-			if Distance < Nearest then
-				Nearest = Distance
-			end
+			local Root =
+				GetHunterRoot(Hunter)
 
-			if Distance <= Radius then
-				Count += 1
+			if Humanoid
+				and Humanoid.Health > 0
+				and Root then
+
+				local Distance =
+					(
+						Root.Position
+						- Position
+					).Magnitude
+
+				if Distance < Nearest then
+					Nearest = Distance
+				end
+
+				if Distance <= Radius then
+					Count += 1
+				end
 			end
 		end
 	end
@@ -537,7 +470,7 @@ end
 -- SAFEST TARGET
 --------------------------------------------------------------
 
-local function GetHunterSafetyScore(
+local function GetTargetSafetyScore(
 	Hunter,
 	PlayerRoot
 )
@@ -550,20 +483,19 @@ local function GetHunterSafetyScore(
 
 	local ThreatCount,
 		NearestThreat =
-		CountThreatsAroundPosition(
+		CountNearbyHunters(
 			Root.Position,
 			Hunter,
 			DANGER_RADIUS
 		)
 
-	local PlayerDistance =
+	local TravelDistance =
 		(
 			Root.Position
 			- PlayerRoot.Position
 		).Magnitude
 
-	-- Lower = safer.
-	-- Nearby threats matter far more than travel distance.
+	-- Lower is safer.
 	local Score =
 		ThreatCount * 100
 
@@ -573,54 +505,47 @@ local function GetHunterSafetyScore(
 				DANGER_RADIUS
 				- NearestThreat
 			)
-			* 7
+			* 5
 	end
 
+	-- Distance is a small tie breaker only.
 	Score +=
-		PlayerDistance
-		* 0.025
+		TravelDistance * 0.02
 
 	return Score, ThreatCount
 end
 
-local function FindSafestHunter(
-	PlayerRoot
-)
-	if not PlayerRoot then
+local function FindSafestHunter(PlayerRoot)
+	if not HUNTERS then
 		return nil, 0
 	end
 
-	local BestTarget = nil
+	local BestHunter = nil
 	local BestScore = math.huge
 	local BestThreatCount = 0
 
-	for _, Hunter in ipairs(
-		HUNTERS:GetChildren()
-	) do
+	for _, Hunter in ipairs(HUNTERS:GetChildren()) do
 		if IsValidHunter(Hunter) then
 			local Score,
 				ThreatCount =
-				GetHunterSafetyScore(
+				GetTargetSafetyScore(
 					Hunter,
 					PlayerRoot
 				)
 
 			if Score < BestScore then
 				BestScore = Score
-				BestTarget = Hunter
-				BestThreatCount =
-					ThreatCount
+				BestHunter = Hunter
+				BestThreatCount = ThreatCount
 			end
 		end
 	end
 
-	return
-		BestTarget,
-		BestThreatCount
+	return BestHunter, BestThreatCount
 end
 
 --------------------------------------------------------------
--- GROUND-SAFE PLAYER POSITION
+-- GROUND ADJUSTMENT
 --------------------------------------------------------------
 
 local function GetGroundAdjustedPosition(
@@ -639,73 +564,38 @@ local function GetGroundAdjustedPosition(
 		Character
 	}
 
-	local Origin =
-		Position
-		+ Vector3.new(
-			0,
-			5,
-			0
-		)
-
 	local Result =
 		workspace:Raycast(
-			Origin,
-			Vector3.new(
-				0,
-				-18,
-				0
-			),
+			Position
+			+ Vector3.new(0, 6, 0),
+
+			Vector3.new(0, -20, 0),
+
 			Params
 		)
 
 	if Result then
-		local StandingY =
+		local Y =
 			Result.Position.Y
 			+ Humanoid.HipHeight
-			+ (
-				PlayerRoot.Size.Y
-				* 0.5
-			)
+			+ PlayerRoot.Size.Y * 0.5
 
-		return Vector3.new(
-			Position.X,
-			StandingY,
-			Position.Z
-		)
+		return
+			Vector3.new(
+				Position.X,
+				Y,
+				Position.Z
+			)
 	end
 
 	return Position
 end
 
 --------------------------------------------------------------
--- SAFEST REAR POSITION
+-- CONSTANT REAR POSITION
 --------------------------------------------------------------
 
-local function RotateFlatVector(
-	Vector,
-	Degrees
-)
-	local Angle =
-		math.rad(Degrees)
-
-	local Cos =
-		math.cos(Angle)
-
-	local Sin =
-		math.sin(Angle)
-
-	return Vector3.new(
-		Vector.X * Cos
-			- Vector.Z * Sin,
-
-		0,
-
-		Vector.X * Sin
-			+ Vector.Z * Cos
-	)
-end
-
-local function GetSafestRearCFrame(
+local function GetRearCFrame(
 	Hunter,
 	Character,
 	Humanoid,
@@ -719,7 +609,7 @@ local function GetSafestRearCFrame(
 		or not Humanoid
 		or not PlayerRoot then
 
-		return nil, 0
+		return nil
 	end
 
 	local Forward =
@@ -727,99 +617,40 @@ local function GetSafestRearCFrame(
 			HunterRoot.CFrame.LookVector
 		)
 
+	-- Behind Hunter.
 	local Back =
 		-Forward
 
-	local BestPosition = nil
-	local BestSafety = -math.huge
-	local BestThreatCount = 0
+	local Distance =
+		ATTACK_DISTANCE
 
-	local DamageRetreat =
-		os.clock() < EvadeUntil
-		and DAMAGE_RETREAT_BONUS
-		or 0
-
-	for _, Angle in ipairs(
-		REAR_ANGLE_OPTIONS
-	) do
-		local Direction =
-			RotateFlatVector(
-				Back,
-				Angle
+	-- Temporary safety boost after taking damage.
+	if os.clock() < EvadeUntil then
+		Distance =
+			math.min(
+				MAX_ATTACK_DISTANCE,
+				ATTACK_DISTANCE
+					+ DAMAGE_DISTANCE_BONUS
 			)
-
-		for _, Offset in ipairs(
-			REAR_DISTANCE_OPTIONS
-		) do
-			local Distance =
-				math.clamp(
-					BEHIND_DISTANCE
-						+ Offset
-						+ DamageRetreat,
-
-					MIN_BEHIND_DISTANCE,
-
-					MAX_BEHIND_DISTANCE
-				)
-
-			local Candidate =
-				HunterRoot.Position
-				+ Direction
-				* Distance
-
-			Candidate =
-				GetGroundAdjustedPosition(
-					Candidate,
-					Character,
-					PlayerRoot,
-					Humanoid
-				)
-
-			local ThreatCount,
-				NearestThreat =
-				CountThreatsAroundPosition(
-					Candidate,
-					Hunter,
-					DANGER_RADIUS
-				)
-
-			-- Higher = safer.
-			local Safety =
-				NearestThreat
-
-			Safety -=
-				ThreatCount
-				* 12
-
-			-- Slight preference for directly behind Hunter.
-			Safety -=
-				math.abs(Angle)
-				* 0.025
-
-			-- Slight preference for user's chosen distance.
-			Safety -=
-				math.abs(Offset)
-				* 0.10
-
-			if Safety > BestSafety then
-				BestSafety = Safety
-				BestPosition = Candidate
-				BestThreatCount =
-					ThreatCount
-			end
-		end
 	end
 
-	if not BestPosition then
-		return nil, 0
-	end
+	local Position =
+		HunterRoot.Position
+		+ Back * Distance
+
+	Position =
+		GetGroundAdjustedPosition(
+			Position,
+			Character,
+			PlayerRoot,
+			Humanoid
+		)
 
 	return
 		CFrame.lookAt(
-			BestPosition,
+			Position,
 			HunterRoot.Position
-		),
-		BestThreatCount
+		)
 end
 
 --------------------------------------------------------------
@@ -833,38 +664,29 @@ local function EquipFists(
 	if not Character
 		or not Humanoid
 		or Humanoid.Health <= 0 then
-
 		return nil
 	end
 
 	local Fists =
-		Character:FindFirstChild(
-			"Fists"
-		)
+		Character:FindFirstChild("Fists")
 
 	if Fists
 		and Fists:IsA("Tool") then
-
 		return Fists
 	end
 
 	local Backpack =
-		Player:FindFirstChild(
-			"Backpack"
-		)
+		Player:FindFirstChild("Backpack")
 
 	if not Backpack then
 		return nil
 	end
 
 	Fists =
-		Backpack:FindFirstChild(
-			"Fists"
-		)
+		Backpack:FindFirstChild("Fists")
 
 	if not Fists
 		or not Fists:IsA("Tool") then
-
 		return nil
 	end
 
@@ -872,12 +694,10 @@ local function EquipFists(
 		Humanoid:EquipTool(Fists)
 	end)
 
-	task.wait(0.03)
+	task.wait(0.025)
 
 	return
-		Character:FindFirstChild(
-			"Fists"
-		)
+		Character:FindFirstChild("Fists")
 end
 
 local function ForceEquipFists()
@@ -885,13 +705,6 @@ local function ForceEquipFists()
 		Humanoid =
 		GetCharacter()
 
-	if not Character
-		or not Humanoid
-		or Humanoid.Health <= 0 then
-
-		return nil
-	end
-
 	return
 		EquipFists(
 			Character,
@@ -900,350 +713,130 @@ local function ForceEquipFists()
 end
 
 --------------------------------------------------------------
--- CURRENT GAME15 FISTS ATTACK
+-- ATTACK
 --------------------------------------------------------------
 
 local function FireAttack()
-	local Remote = CombatRemote
+	local Remote =
+		CombatRemote
 
 	if not Remote
 		or not Remote.Parent then
 
-		Remote = ResolveCombatRemote()
+		Remote =
+			ResolveCombatRemote()
 	end
 
 	if not Remote then
 		return false
 	end
 
-	return pcall(function()
-		Remote:FireServer("Attack")
-	end)
+	local Success =
+		pcall(function()
+			Remote:FireServer("Attack")
+		end)
+
+	return Success
 end
 
 --------------------------------------------------------------
--- ADAPTIVE RANGE
+-- AUTO RANGE
 --------------------------------------------------------------
 
-local function RegisterHitResult(HitLanded)
-	if not AutoRangeEnabled then
+local function ResetRangeLearning(
+	TargetHumanoid
+)
+	AttackAttemptsWithoutDamage = 0
+	ConfirmedHitStreak = 0
+
+	if TargetHumanoid then
+		LastTargetHealth =
+			TargetHumanoid.Health
+	else
+		LastTargetHealth = nil
+	end
+end
+
+local function ObserveTargetDamage(
+	TargetHumanoid
+)
+	if not TargetHumanoid then
 		return
 	end
 
-	if HitLanded then
-		HitSuccessStreak += 1
-		HitMissStreak = 0
+	local CurrentHealth =
+		TargetHumanoid.Health
 
-		-- Slowly test farther reach only after repeated confirmed hits.
-		if HitSuccessStreak >= 3 then
-			STRIKE_DISTANCE =
-				math.min(
-					MAX_STRIKE_DISTANCE,
-					STRIKE_DISTANCE + STRIKE_RANGE_STEP_UP
+	if not LastTargetHealth then
+		LastTargetHealth =
+			CurrentHealth
+
+		return
+	end
+
+	----------------------------------------------------------
+	-- HP decreased = attack distance is working.
+	----------------------------------------------------------
+
+	if CurrentHealth
+		< LastTargetHealth then
+
+		AttackAttemptsWithoutDamage = 0
+		ConfirmedHitStreak += 1
+
+		------------------------------------------------------
+		-- Slowly probe for a farther working range.
+		------------------------------------------------------
+
+		if AUTO_RANGE
+			and ConfirmedHitStreak
+				>= HITS_BEFORE_RANGE_UP then
+
+			ConfirmedHitStreak = 0
+
+			ATTACK_DISTANCE =
+				math.clamp(
+					ATTACK_DISTANCE
+						+ AUTO_RANGE_UP_STEP,
+
+					MIN_ATTACK_DISTANCE,
+
+					MAX_ATTACK_DISTANCE
 				)
-
-			HitSuccessStreak = 0
 		end
-	else
-		HitMissStreak += 1
-		HitSuccessStreak = 0
+	end
 
-		-- Two misses in a row -> move back inside reliable M1 range.
-		if HitMissStreak >= 2 then
-			STRIKE_DISTANCE =
-				math.max(
-					MIN_STRIKE_DISTANCE,
-					STRIKE_DISTANCE - STRIKE_RANGE_STEP_DOWN
-				)
+	LastTargetHealth =
+		CurrentHealth
+end
 
-			HitMissStreak = 0
-		end
+local function RegisterAttackAttempt()
+	AttackAttemptsWithoutDamage += 1
+
+	if AUTO_RANGE
+		and AttackAttemptsWithoutDamage
+			>= MISSES_BEFORE_RANGE_DOWN then
+
+		AttackAttemptsWithoutDamage = 0
+		ConfirmedHitStreak = 0
+
+		ATTACK_DISTANCE =
+			math.clamp(
+				ATTACK_DISTANCE
+					- AUTO_RANGE_DOWN_STEP,
+
+				MIN_ATTACK_DISTANCE,
+
+				MAX_ATTACK_DISTANCE
+			)
 	end
 end
 
 --------------------------------------------------------------
--- BUILD STRIKE CFRAME FROM SAFE REAR CFRAME
+-- MONEY
 --------------------------------------------------------------
 
-local function GetStrikeCFrame(
-	Hunter,
-	Character,
-	Humanoid,
-	PlayerRoot,
-	SafeCFrame
-)
-	local HunterRoot = GetHunterRoot(Hunter)
-
-	if not HunterRoot
-		or not SafeCFrame then
-
-		return nil
-	end
-
-	local Direction =
-		SafeCFrame.Position
-		- HunterRoot.Position
-
-	Direction =
-		Vector3.new(
-			Direction.X,
-			0,
-			Direction.Z
-		)
-
-	if Direction.Magnitude < 0.01 then
-		Direction =
-			-HorizontalUnit(
-				HunterRoot.CFrame.LookVector
-			)
-	else
-		Direction = Direction.Unit
-	end
-
-	local Velocity = HunterRoot.AssemblyLinearVelocity
-
-	local FlatVelocity =
-		Vector3.new(
-			Velocity.X,
-			0,
-			Velocity.Z
-		)
-
-	local PredictedTargetPosition =
-		HunterRoot.Position
-		+ FlatVelocity * TARGET_LEAD_TIME
-
-	local Position =
-		PredictedTargetPosition
-		+ Direction * STRIKE_DISTANCE
-
-	Position =
-		GetGroundAdjustedPosition(
-			Position,
-			Character,
-			PlayerRoot,
-			Humanoid
-		)
-
-	return
-		CFrame.lookAt(
-			Position,
-			PredictedTargetPosition
-		)
-end
-
---------------------------------------------------------------
--- SAFE LONG-REACH STRIKE
---------------------------------------------------------------
-
-local function PerformSafeStrike(
-	Character,
-	Humanoid,
-	PlayerRoot,
-	Hunter,
-	SafeCFrame
-)
-	if not IsValidHunter(Hunter)
-		or not Character
-		or not Humanoid
-		or not PlayerRoot
-		or not SafeCFrame then
-
-		return false
-	end
-
-	local Fists =
-		EquipFists(
-			Character,
-			Humanoid
-		)
-
-	if not Fists then
-		return false
-	end
-
-	local HunterHumanoid =
-		Hunter:FindFirstChildOfClass("Humanoid")
-
-	local HPBefore =
-		HunterHumanoid
-		and HunterHumanoid.Health
-		or nil
-
-	----------------------------------------------------------
-	-- LOCK-ON STRIKE PREP
-	--
-	-- Do not teleport once and immediately send the remote.
-	-- On a moving Hunter, the remote can reach the server before
-	-- the new character position has replicated. Instead we follow
-	-- the Hunter inside real M1 range for a few frames first.
-	----------------------------------------------------------
-
-	local PrepEnd =
-		os.clock()
-		+ STRIKE_PREP_TIME
-
-	repeat
-		if not IsValidHunter(Hunter)
-			or not PlayerRoot.Parent then
-
-			return false
-		end
-
-		local LiveSafeCFrame =
-			select(
-				1,
-				GetSafestRearCFrame(
-					Hunter,
-					Character,
-					Humanoid,
-					PlayerRoot
-				)
-			)
-
-		LiveSafeCFrame =
-			LiveSafeCFrame
-			or SafeCFrame
-
-		local LiveStrikeCFrame =
-			GetStrikeCFrame(
-				Hunter,
-				Character,
-				Humanoid,
-				PlayerRoot,
-				LiveSafeCFrame
-			)
-
-		if LiveStrikeCFrame then
-			SetCharacterCFrame(
-				PlayerRoot,
-				LiveStrikeCFrame
-			)
-		end
-
-		RunService.Heartbeat:Wait()
-	until os.clock() >= PrepEnd
-
-	----------------------------------------------------------
-	-- ATTACK USING CURRENT GAME15 REMOTE
-	----------------------------------------------------------
-
-	local Sent =
-		FireAttack()
-
-	----------------------------------------------------------
-	-- Keep tracking briefly AFTER sending Attack as well.
-	-- This covers latency/server validation while Hunter moves.
-	----------------------------------------------------------
-
-	local TrackEnd =
-		os.clock()
-		+ STRIKE_TRACK_AFTER_ATTACK
-
-	repeat
-		if not IsValidHunter(Hunter)
-			or not PlayerRoot.Parent then
-
-			break
-		end
-
-		local LiveSafeCFrame =
-			select(
-				1,
-				GetSafestRearCFrame(
-					Hunter,
-					Character,
-					Humanoid,
-					PlayerRoot
-				)
-			)
-
-		LiveSafeCFrame =
-			LiveSafeCFrame
-			or SafeCFrame
-
-		local LiveStrikeCFrame =
-			GetStrikeCFrame(
-				Hunter,
-				Character,
-				Humanoid,
-				PlayerRoot,
-				LiveSafeCFrame
-			)
-
-		if LiveStrikeCFrame then
-			SetCharacterCFrame(
-				PlayerRoot,
-				LiveStrikeCFrame
-			)
-		end
-
-		RunService.Heartbeat:Wait()
-	until os.clock() >= TrackEnd
-
-	----------------------------------------------------------
-	-- Recompute the safe point AFTER the strike. Never return to
-	-- the old CFrame because the Hunter may have moved far away.
-	----------------------------------------------------------
-
-	if PlayerRoot.Parent
-		and IsValidHunter(Hunter) then
-
-		local FreshSafeCFrame =
-			select(
-				1,
-				GetSafestRearCFrame(
-					Hunter,
-					Character,
-					Humanoid,
-					PlayerRoot
-				)
-			)
-
-		if FreshSafeCFrame then
-			SetCharacterCFrame(
-				PlayerRoot,
-				FreshSafeCFrame
-			)
-		end
-	end
-
-	----------------------------------------------------------
-	-- Adaptive range hit confirmation
-	----------------------------------------------------------
-
-	if Sent
-		and HPBefore
-		and HunterHumanoid then
-
-		task.delay(
-			0.16,
-			function()
-				if HunterHumanoid.Parent
-					and HunterHumanoid.Health > 0 then
-
-					RegisterHitResult(
-						HunterHumanoid.Health < HPBefore
-					)
-
-				elseif HunterHumanoid.Health <= 0 then
-
-					RegisterHitResult(true)
-				end
-			end
-		)
-	end
-
-	return Sent
-end
-
---==============================================================
--- AUTO MONEY
---==============================================================
-
-local function GetMoneyPart(
-	Bag
-)
+local function GetMoneyPart(Bag)
 	if Bag:IsA("BasePart") then
 		return Bag
 	end
@@ -1276,15 +869,14 @@ local function CollectBag(
 
 	if not Part
 		or not PlayerRoot then
-
 		return false
 	end
 
-	local Now =
-		os.clock()
+	local Now = os.clock()
 
 	if MoneyAttempt[Bag]
-		and Now - MoneyAttempt[Bag]
+		and Now
+			- MoneyAttempt[Bag]
 			< MONEY_TOUCH_COOLDOWN then
 
 		return false
@@ -1292,13 +884,8 @@ local function CollectBag(
 
 	MoneyAttempt[Bag] = Now
 
-	----------------------------------------------------------
-	-- Safe option: touch without moving the player.
-	----------------------------------------------------------
-
-	if type(firetouchinterest)
-		== "function" then
-
+	-- Keep the player behind Hunter; do not teleport away for money.
+	if type(firetouchinterest) == "function" then
 		pcall(function()
 			firetouchinterest(
 				PlayerRoot,
@@ -1318,13 +905,13 @@ local function CollectBag(
 		return true
 	end
 
-	-- To prioritize survival, do not teleport away from the target
-	-- merely to pick up money if touch simulation is unavailable.
 	return false
 end
 
 local function CollectMoney()
-	if not AUTO_MONEY then
+	if not AUTO_MONEY
+		or not DROPPED_MONEY
+		or not DROPPED_MONEY.Parent then
 
 		return 0
 	end
@@ -1346,9 +933,7 @@ local function CollectMoney()
 	for _, Object in ipairs(
 		DROPPED_MONEY:GetChildren()
 	) do
-		if Object.Name
-			== "KillMoneyBag" then
-
+		if Object.Name == "KillMoneyBag" then
 			if CollectBag(
 				Object,
 				PlayerRoot
@@ -1369,16 +954,12 @@ end
 local GUI =
 	Instance.new("ScreenGui")
 
-GUI.Name =
-	"AutoHunterFarmGUI"
-
+GUI.Name = "AutoHunterFarmGUI"
 GUI.ResetOnSpawn = false
 GUI.Parent = PlayerGui
 
-FarmGUI = GUI
-
 --------------------------------------------------------------
--- OPEN BUTTON
+-- OPEN
 --------------------------------------------------------------
 
 local Open =
@@ -1386,7 +967,7 @@ local Open =
 
 Open.Size =
 	UDim2.fromOffset(
-		140,
+		150,
 		44
 	)
 
@@ -1406,14 +987,10 @@ Open.BackgroundColor3 =
 	)
 
 Open.Text =
-	"HUNTER SAFE FARM"
+	"HUNTER REAR FARM"
 
 Open.TextColor3 =
-	Color3.new(
-		1,
-		1,
-		1
-	)
+	Color3.new(1, 1, 1)
 
 Open.Font =
 	Enum.Font.GothamBold
@@ -1436,16 +1013,16 @@ local Frame =
 
 Frame.Size =
 	UDim2.fromOffset(
-		410,
-		475
+		420,
+		500
 	)
 
 Frame.Position =
 	UDim2.new(
 		0.5,
-		-205,
+		-210,
 		0.5,
-		-237
+		-250
 	)
 
 Frame.BackgroundColor3 =
@@ -1486,7 +1063,7 @@ Title.Position =
 	)
 
 Title.BackgroundTransparency = 1
-Title.Text = "Auto Hunter Long Reach"
+Title.Text = "Auto Hunter Rear Reach"
 Title.TextColor3 = Color3.new(1, 1, 1)
 Title.Font = Enum.Font.GothamBold
 Title.TextSize = 20
@@ -1534,7 +1111,7 @@ Instance.new(
 	UDim.new(0, 10)
 
 --------------------------------------------------------------
--- MAIN TOGGLE
+-- AUTO HUNTER
 --------------------------------------------------------------
 
 local Toggle =
@@ -1608,34 +1185,21 @@ for Index, Preset in ipairs(
 	Button.Size =
 		UDim2.new(
 			0,
-			115,
+			118,
 			0,
 			38
 		)
 
 	Button.Position =
 		UDim2.fromOffset(
-			21
-				+ (
-					(Index - 1)
-					* 124
-				),
+			20
+				+ ((Index - 1) * 128),
 			143
 		)
 
-	Button.Text =
-		Preset.Name
-
-	Button.TextColor3 =
-		Color3.new(
-			1,
-			1,
-			1
-		)
-
-	Button.Font =
-		Enum.Font.GothamBold
-
+	Button.Text = Preset.Name
+	Button.TextColor3 = Color3.new(1, 1, 1)
+	Button.Font = Enum.Font.GothamBold
 	Button.TextSize = 13
 	Button.Parent = Frame
 
@@ -1645,12 +1209,11 @@ for Index, Preset in ipairs(
 	).CornerRadius =
 		UDim.new(0, 8)
 
-	LevelButtons[Index] =
-		Button
+	LevelButtons[Index] = Button
 end
 
 --------------------------------------------------------------
--- BEHIND DISTANCE
+-- ATTACK DISTANCE
 --------------------------------------------------------------
 
 local DistanceTitle =
@@ -1667,11 +1230,11 @@ DistanceTitle.Size =
 DistanceTitle.Position =
 	UDim2.fromOffset(
 		0,
-		193
+		194
 	)
 
 DistanceTitle.BackgroundTransparency = 1
-DistanceTitle.Text = "Safe Distance"
+DistanceTitle.Text = "Rear Attack Distance"
 DistanceTitle.TextColor3 = Color3.new(1, 1, 1)
 DistanceTitle.Font = Enum.Font.GothamBold
 DistanceTitle.TextSize = 15
@@ -1710,14 +1273,14 @@ local DistanceValue =
 
 DistanceValue.Size =
 	UDim2.fromOffset(
-		92,
+		110,
 		42
 	)
 
 DistanceValue.Position =
 	UDim2.new(
 		0.5,
-		-46,
+		-55,
 		0,
 		224
 	)
@@ -1776,7 +1339,7 @@ RangeButton.Size =
 RangeButton.Position =
 	UDim2.fromOffset(
 		18,
-		284
+		286
 	)
 
 RangeButton.TextColor3 = Color3.new(1, 1, 1)
@@ -1806,7 +1369,7 @@ MoneyButton.Position =
 		0.5,
 		6,
 		0,
-		284
+		286
 	)
 
 MoneyButton.TextColor3 = Color3.new(1, 1, 1)
@@ -1821,7 +1384,7 @@ Instance.new(
 	UDim.new(0, 9)
 
 --------------------------------------------------------------
--- RANGE / COMBAT STATUS
+-- COMBAT STATUS
 --------------------------------------------------------------
 
 local CombatStatus =
@@ -1838,14 +1401,13 @@ CombatStatus.Size =
 CombatStatus.Position =
 	UDim2.fromOffset(
 		10,
-		338
+		342
 	)
 
 CombatStatus.BackgroundTransparency = 1
-CombatStatus.Text = "CombatRemote: checking..."
-CombatStatus.TextColor3 = Color3.fromRGB(120, 200, 235)
+CombatStatus.TextColor3 = Color3.fromRGB(135, 190, 230)
 CombatStatus.Font = Enum.Font.GothamBold
-CombatStatus.TextSize = 13
+CombatStatus.TextSize = 12
 CombatStatus.Parent = Frame
 
 --------------------------------------------------------------
@@ -1866,18 +1428,46 @@ SafetyStatus.Size =
 SafetyStatus.Position =
 	UDim2.fromOffset(
 		10,
-		366
+		369
 	)
 
 SafetyStatus.BackgroundTransparency = 1
-SafetyStatus.Text = "Nearby threats: 0"
-SafetyStatus.TextColor3 = Color3.fromRGB(135, 190, 230)
+SafetyStatus.Text = "Nearby Hunters: 0"
+SafetyStatus.TextColor3 = Color3.fromRGB(195, 165, 110)
 SafetyStatus.Font = Enum.Font.GothamBold
-SafetyStatus.TextSize = 13
+SafetyStatus.TextSize = 12
 SafetyStatus.Parent = Frame
 
 --------------------------------------------------------------
--- STATUS
+-- RANGE STATUS
+--------------------------------------------------------------
+
+local RangeStatus =
+	Instance.new("TextLabel")
+
+RangeStatus.Size =
+	UDim2.new(
+		1,
+		-20,
+		0,
+		27
+	)
+
+RangeStatus.Position =
+	UDim2.fromOffset(
+		10,
+		396
+	)
+
+RangeStatus.BackgroundTransparency = 1
+RangeStatus.Text = "Range learning: ready"
+RangeStatus.TextColor3 = Color3.fromRGB(170, 200, 145)
+RangeStatus.Font = Enum.Font.GothamBold
+RangeStatus.TextSize = 12
+RangeStatus.Parent = Frame
+
+--------------------------------------------------------------
+-- MAIN STATUS
 --------------------------------------------------------------
 
 local Status =
@@ -1896,7 +1486,7 @@ Status.Position =
 		0,
 		10,
 		1,
-		-70
+		-68
 	)
 
 Status.BackgroundTransparency = 1
@@ -1913,109 +1503,49 @@ Status.Parent = Frame
 
 local function UpdateGUI()
 	if Enabled then
-		Toggle.Text =
-			"AUTO HUNTER : ON"
-
-		Toggle.BackgroundColor3 =
-			Color3.fromRGB(
-				45,
-				155,
-				80
-			)
+		Toggle.Text = "AUTO HUNTER : ON"
+		Toggle.BackgroundColor3 = Color3.fromRGB(45, 155, 80)
 	else
-		Toggle.Text =
-			"AUTO HUNTER : OFF"
-
-		Toggle.BackgroundColor3 =
-			Color3.fromRGB(
-				170,
-				55,
-				55
-			)
+		Toggle.Text = "AUTO HUNTER : OFF"
+		Toggle.BackgroundColor3 = Color3.fromRGB(170, 55, 55)
 	end
 
-	for Index, Button in ipairs(
-		LevelButtons
-	) do
+	for Index, Button in ipairs(LevelButtons) do
 		if Index == SelectedPreset then
-			Button.BackgroundColor3 =
-				Color3.fromRGB(
-					45,
-					145,
-					80
-				)
+			Button.BackgroundColor3 = Color3.fromRGB(45, 145, 80)
 		else
-			Button.BackgroundColor3 =
-				Color3.fromRGB(
-					60,
-					60,
-					70
-				)
+			Button.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
 		end
 	end
 
 	DistanceValue.Text =
 		string.format(
 			"%.2f",
-			BEHIND_DISTANCE
+			ATTACK_DISTANCE
 		)
 
-	if AutoRangeEnabled then
-		RangeButton.Text =
-			"AUTO RANGE : ON"
-
-		RangeButton.BackgroundColor3 =
-			Color3.fromRGB(
-				55,
-				125,
-				180
-			)
+	if AUTO_RANGE then
+		RangeButton.Text = "AUTO RANGE : ON"
+		RangeButton.BackgroundColor3 = Color3.fromRGB(55, 125, 180)
 	else
-		RangeButton.Text =
-			"AUTO RANGE : OFF"
-
-		RangeButton.BackgroundColor3 =
-			Color3.fromRGB(
-				65,
-				65,
-				75
-			)
-	end
-
-	if CombatRemote
-		and CombatRemote.Parent then
-
-		CombatStatus.Text =
-			string.format(
-				"Remote READY | Strike %.2f | Safe %.1f",
-				STRIKE_DISTANCE,
-				BEHIND_DISTANCE
-			)
-	else
-		CombatStatus.Text =
-			"CombatRemote: NOT FOUND"
+		RangeButton.Text = "AUTO RANGE : OFF"
+		RangeButton.BackgroundColor3 = Color3.fromRGB(65, 65, 75)
 	end
 
 	if AUTO_MONEY then
-		MoneyButton.Text =
-			"AUTO MONEY : ON"
-
-		MoneyButton.BackgroundColor3 =
-			Color3.fromRGB(
-				180,
-				135,
-				45
-			)
+		MoneyButton.Text = "AUTO MONEY : ON"
+		MoneyButton.BackgroundColor3 = Color3.fromRGB(180, 135, 45)
 	else
-		MoneyButton.Text =
-			"AUTO MONEY : OFF"
+		MoneyButton.Text = "AUTO MONEY : OFF"
+		MoneyButton.BackgroundColor3 = Color3.fromRGB(65, 65, 75)
+	end
 
-		MoneyButton.BackgroundColor3 =
-			Color3.fromRGB(
-				65,
-				65,
-				75
-			)
+	if CombatRemote and CombatRemote.Parent then
+		CombatStatus.Text =
+			"CombatRemote: READY | Attack cooldown 0.44s"
+	else
+		CombatStatus.Text =
+			"CombatRemote: NOT FOUND"
 	end
 end
 
@@ -2023,14 +1553,13 @@ end
 -- GUI EVENTS
 --------------------------------------------------------------
 
-for Index, Button in ipairs(
-	LevelButtons
-) do
+for Index, Button in ipairs(LevelButtons) do
 	Button.MouseButton1Click:Connect(
 		function()
 			SelectedPreset = Index
 			CurrentTarget = nil
 			LastTargetRecheck = 0
+			ResetRangeLearning(nil)
 
 			UpdateGUI()
 		end
@@ -2043,16 +1572,11 @@ Toggle.MouseButton1Click:Connect(
 
 		CurrentTarget = nil
 		LastTargetRecheck = 0
+		ResetRangeLearning(nil)
 
 		if Enabled then
 			ResolveCombatRemote()
-
-			Status.Text =
-				"Equipping Fists..."
-
 			ForceEquipFists()
-
-			RefreshThreatCache()
 
 			Status.Text =
 				"Searching safest Hunter..."
@@ -2064,33 +1588,45 @@ Toggle.MouseButton1Click:Connect(
 	end
 )
 
-DistancePlus.MouseButton1Click:Connect(
+DistanceMinus.MouseButton1Click:Connect(
 	function()
-		BEHIND_DISTANCE +=
-			BEHIND_STEP
-
-		BEHIND_DISTANCE =
+		ATTACK_DISTANCE =
 			math.clamp(
-				BEHIND_DISTANCE,
-				MIN_BEHIND_DISTANCE,
-				MAX_BEHIND_DISTANCE
+				ATTACK_DISTANCE
+					- MANUAL_DISTANCE_STEP,
+
+				MIN_ATTACK_DISTANCE,
+
+				MAX_ATTACK_DISTANCE
 			)
+
+		ResetRangeLearning(
+			CurrentTarget
+			and CurrentTarget:FindFirstChildOfClass("Humanoid")
+			or nil
+		)
 
 		UpdateGUI()
 	end
 )
 
-DistanceMinus.MouseButton1Click:Connect(
+DistancePlus.MouseButton1Click:Connect(
 	function()
-		BEHIND_DISTANCE -=
-			BEHIND_STEP
-
-		BEHIND_DISTANCE =
+		ATTACK_DISTANCE =
 			math.clamp(
-				BEHIND_DISTANCE,
-				MIN_BEHIND_DISTANCE,
-				MAX_BEHIND_DISTANCE
+				ATTACK_DISTANCE
+					+ MANUAL_DISTANCE_STEP,
+
+				MIN_ATTACK_DISTANCE,
+
+				MAX_ATTACK_DISTANCE
 			)
+
+		ResetRangeLearning(
+			CurrentTarget
+			and CurrentTarget:FindFirstChildOfClass("Humanoid")
+			or nil
+		)
 
 		UpdateGUI()
 	end
@@ -2098,11 +1634,12 @@ DistanceMinus.MouseButton1Click:Connect(
 
 RangeButton.MouseButton1Click:Connect(
 	function()
-		AutoRangeEnabled =
-			not AutoRangeEnabled
-
-		HitSuccessStreak = 0
-		HitMissStreak = 0
+		AUTO_RANGE = not AUTO_RANGE
+		ResetRangeLearning(
+			CurrentTarget
+			and CurrentTarget:FindFirstChildOfClass("Humanoid")
+			or nil
+		)
 
 		UpdateGUI()
 	end
@@ -2110,9 +1647,7 @@ RangeButton.MouseButton1Click:Connect(
 
 MoneyButton.MouseButton1Click:Connect(
 	function()
-		AUTO_MONEY =
-			not AUTO_MONEY
-
+		AUTO_MONEY = not AUTO_MONEY
 		UpdateGUI()
 	end
 )
@@ -2131,14 +1666,12 @@ Close.MouseButton1Click:Connect(
 )
 
 --==============================================================
--- DAMAGE DETECTION
+-- DAMAGE MONITOR
 --==============================================================
 
 local HealthConnection = nil
 
-local function ConnectHealthMonitor(
-	Character
-)
+local function ConnectHealthMonitor(Character)
 	if HealthConnection then
 		pcall(function()
 			HealthConnection:Disconnect()
@@ -2148,9 +1681,7 @@ local function ConnectHealthMonitor(
 	end
 
 	local Humanoid =
-		Character:FindFirstChildOfClass(
-			"Humanoid"
-		)
+		Character:FindFirstChildOfClass("Humanoid")
 
 	if not Humanoid then
 		return
@@ -2170,7 +1701,6 @@ local function ConnectHealthMonitor(
 						os.clock()
 						+ DAMAGE_EVADE_TIME
 
-					-- Reconsider target quickly if player gets hit.
 					LastTargetRecheck = 0
 				end
 
@@ -2181,9 +1711,7 @@ local function ConnectHealthMonitor(
 end
 
 if Player.Character then
-	ConnectHealthMonitor(
-		Player.Character
-	)
+	ConnectHealthMonitor(Player.Character)
 end
 
 --------------------------------------------------------------
@@ -2194,64 +1722,34 @@ Player.CharacterAdded:Connect(
 	function(Character)
 		CurrentTarget = nil
 		LastTargetRecheck = 0
+		ResetRangeLearning(nil)
 
-		ConnectHealthMonitor(
-			Character
-		)
+		ConnectHealthMonitor(Character)
 
 		if not Enabled then
 			return
 		end
 
-		local Humanoid =
-			Character:WaitForChild(
-				"Humanoid",
-				10
-			)
+		Character:WaitForChild(
+			"Humanoid",
+			10
+		)
 
 		Character:WaitForChild(
 			"HumanoidRootPart",
 			10
 		)
 
-		task.wait(0.75)
+		task.wait(0.65)
 
-		if Enabled
-			and Humanoid
-			and Humanoid.Health > 0 then
-
+		if Enabled then
 			ForceEquipFists()
 		end
 	end
 )
 
 --==============================================================
--- THREAT CACHE LOOP
---==============================================================
-
-task.spawn(function()
-	while Running
-		and GUI.Parent do
-
-		if Enabled then
-			local Now =
-				os.clock()
-
-			if Now - LastThreatRefresh
-				>= THREAT_REFRESH_INTERVAL then
-
-				LastThreatRefresh = Now
-
-				RefreshThreatCache()
-			end
-		end
-
-		task.wait(0.10)
-	end
-end)
-
---==============================================================
--- COMBAT REMOTE RESOLVE LOOP
+-- COMBAT REMOTE RECOVERY
 --==============================================================
 
 task.spawn(function()
@@ -2264,7 +1762,9 @@ task.spawn(function()
 			not CombatRemote
 			or not CombatRemote.Parent
 		)
-			and Now - LastCombatResolve >= 1.0 then
+			and Now
+				- LastCombatResolve
+				>= 1.0 then
 
 			LastCombatResolve = Now
 			ResolveCombatRemote()
@@ -2286,14 +1786,13 @@ task.spawn(function()
 		if Enabled
 			and AUTO_MONEY then
 
-			local Now =
-				os.clock()
+			local Now = os.clock()
 
-			if Now - LastMoneyScan
+			if Now
+				- LastMoneyScan
 				>= MONEY_SCAN_INTERVAL then
 
 				LastMoneyScan = Now
-
 				CollectMoney()
 			end
 		end
@@ -2303,7 +1802,7 @@ task.spawn(function()
 end)
 
 --==============================================================
--- MAIN SAFE FARM LOOP
+-- MAIN FARM LOOP
 --==============================================================
 
 task.spawn(function()
@@ -2311,7 +1810,6 @@ task.spawn(function()
 		and GUI.Parent do
 
 		if Enabled then
-
 			local Character,
 				Humanoid,
 				PlayerRoot =
@@ -2321,22 +1819,20 @@ task.spawn(function()
 				and PlayerRoot
 				and Humanoid.Health > 0 then
 
-				local Now =
-					os.clock()
+				local Now = os.clock()
 
 				------------------------------------------------
-				-- Fists must always be equipped.
+				-- Keep Fists equipped
 				------------------------------------------------
 
-				if Now - LastEquipCheck
+				if Now
+					- LastEquipCheck
 					>= EQUIP_CHECK_INTERVAL then
 
 					LastEquipCheck = Now
 
 					local Fists =
-						Character:FindFirstChild(
-							"Fists"
-						)
+						Character:FindFirstChild("Fists")
 
 					if not Fists
 						or not Fists:IsA("Tool") then
@@ -2349,62 +1845,71 @@ task.spawn(function()
 				end
 
 				------------------------------------------------
-				-- Re-evaluate safest Hunter.
+				-- Current target still valid?
 				------------------------------------------------
 
-				local NeedNewTarget =
-					not IsValidHunter(
-						CurrentTarget
-					)
+				if not IsValidHunter(CurrentTarget) then
+					CurrentTarget = nil
+					ResetRangeLearning(nil)
+				end
 
-				if Now - LastTargetRecheck
+				------------------------------------------------
+				-- Select/reconsider Hunter
+				------------------------------------------------
+
+				if Now
+					- LastTargetRecheck
 					>= TARGET_RECHECK_INTERVAL then
 
 					LastTargetRecheck = Now
 
-					if NeedNewTarget then
-						local NewTarget,
-							ThreatCount =
+					if not CurrentTarget then
+						local NewTarget =
 							FindSafestHunter(
 								PlayerRoot
 							)
 
 						CurrentTarget = NewTarget
-						CurrentThreatCount =
-							ThreatCount
+
+						if CurrentTarget then
+							ResetRangeLearning(
+								CurrentTarget:FindFirstChildOfClass(
+									"Humanoid"
+								)
+							)
+						end
+
 					else
-						local CurrentScore,
+						local _,
 							CurrentDanger =
-							GetHunterSafetyScore(
+							GetTargetSafetyScore(
 								CurrentTarget,
 								PlayerRoot
 							)
 
-						CurrentThreatCount =
-							CurrentDanger
-
-						-- If current Hunter is surrounded, see if another
-						-- Hunter is substantially safer.
 						if CurrentDanger
 							>= DANGER_SWITCH_THRESHOLD then
 
-							local NewTarget,
-								NewDanger =
+							local BetterTarget,
+								BetterDanger =
 								FindSafestHunter(
 									PlayerRoot
 								)
 
-							if NewTarget
-								and NewTarget
+							if BetterTarget
+								and BetterTarget
 									~= CurrentTarget
-								and NewDanger
+								and BetterDanger
 									< CurrentDanger then
 
 								CurrentTarget =
-									NewTarget
+									BetterTarget
 
-								CurrentThreatCount =
-									NewDanger
+								ResetRangeLearning(
+									CurrentTarget:FindFirstChildOfClass(
+										"Humanoid"
+									)
+								)
 							end
 						end
 					end
@@ -2414,10 +1919,7 @@ task.spawn(function()
 				-- No target
 				------------------------------------------------
 
-				if not IsValidHunter(
-					CurrentTarget
-				) then
-
+				if not CurrentTarget then
 					local Preset =
 						LEVEL_PRESETS[
 							SelectedPreset
@@ -2428,47 +1930,47 @@ task.spawn(function()
 						.. Preset.Name
 
 					SafetyStatus.Text =
-						"Nearby threats: 0"
+						"Nearby Hunters: 0"
 
-					task.wait(
-						FOLLOW_INTERVAL
-					)
-
+					task.wait(FOLLOW_INTERVAL)
 					continue
 				end
 
 				------------------------------------------------
-				-- Safe rear position
+				-- Track target HP for Auto Range
 				------------------------------------------------
 
-				local SafeCFrame,
-					NearbyThreats =
-					GetSafestRearCFrame(
+				local HunterHumanoid =
+					CurrentTarget
+					:FindFirstChildOfClass("Humanoid")
+
+				ObserveTargetDamage(
+					HunterHumanoid
+				)
+
+				------------------------------------------------
+				-- STAY BEHIND CONTINUOUSLY
+				-- There is no blink in/out here.
+				------------------------------------------------
+
+				local RearCFrame =
+					GetRearCFrame(
 						CurrentTarget,
 						Character,
 						Humanoid,
 						PlayerRoot
 					)
 
-				CurrentThreatCount =
-					NearbyThreats
-
-				if SafeCFrame then
+				if RearCFrame then
 					SetCharacterCFrame(
 						PlayerRoot,
-						SafeCFrame
+						RearCFrame
 					)
 				end
 
 				------------------------------------------------
 				-- Status
 				------------------------------------------------
-
-				local HunterHumanoid =
-					CurrentTarget
-					:FindFirstChildOfClass(
-						"Humanoid"
-					)
 
 				local HunterLevel =
 					GetHunterLevel(
@@ -2489,47 +1991,90 @@ task.spawn(function()
 						)
 				end
 
-				SafetyStatus.Text =
-					"Nearby threats: "
-					.. tostring(
-						NearbyThreats
+				local HunterRoot =
+					GetHunterRoot(
+						CurrentTarget
+					)
+
+				if HunterRoot then
+					local Nearby =
+						select(
+							1,
+							CountNearbyHunters(
+								HunterRoot.Position,
+								CurrentTarget,
+								DANGER_RADIUS
+							)
+						)
+
+					SafetyStatus.Text =
+						"Nearby Hunters: "
+						.. tostring(Nearby)
+				end
+
+				RangeStatus.Text =
+					string.format(
+						"Range %.2f | Hit streak %d | Miss %d",
+						ATTACK_DISTANCE,
+						ConfirmedHitStreak,
+						AttackAttemptsWithoutDamage
+					)
+
+				DistanceValue.Text =
+					string.format(
+						"%.2f",
+						ATTACK_DISTANCE
 					)
 
 				------------------------------------------------
-				-- Attack only when not in damage-evade window.
+				-- During damage evade: stay farther behind,
+				-- do not attack.
 				------------------------------------------------
 
-				if Now >= EvadeUntil then
-					if Now - LastAttack
-						>= ATTACK_INTERVAL then
-
-						LastAttack = Now
-
-						local Sent =
-							PerformSafeStrike(
-								Character,
-								Humanoid,
-								PlayerRoot,
-								CurrentTarget,
-								SafeCFrame
-							)
-
-						if not Sent then
-							ResolveCombatRemote()
-						end
-
-						UpdateGUI()
-					end
-				else
+				if Now < EvadeUntil then
 					Status.Text =
 						"Evading damage..."
+
+					task.wait(FOLLOW_INTERVAL)
+					continue
+				end
+
+				------------------------------------------------
+				-- Attack while remaining at the SAME rear range.
+				------------------------------------------------
+
+				if Now
+					- LastAttack
+					>= ATTACK_INTERVAL then
+
+					LastAttack = Now
+
+					if not CombatRemote
+						or not CombatRemote.Parent then
+
+						ResolveCombatRemote()
+
+						if not CombatRemote then
+							CombatStatus.Text =
+								"CombatRemote: NOT FOUND"
+
+							Status.Text =
+								"Waiting for CombatRemote..."
+
+							task.wait(FOLLOW_INTERVAL)
+							continue
+						end
+					end
+
+					-- Register this attempt BEFORE waiting for HP replication.
+					RegisterAttackAttempt()
+
+					FireAttack()
 				end
 			end
 		end
 
-		task.wait(
-			FOLLOW_INTERVAL
-		)
+		task.wait(FOLLOW_INTERVAL)
 	end
 end)
 
@@ -2618,44 +2163,37 @@ local function Stop()
 		GUI:Destroy()
 	end
 
-	print(
-		"[Auto Hunter Long Reach] stopped"
-	)
+	print("[Auto Hunter Rear Reach] stopped")
 end
 
-ENV.AutoHunterFarmStop =
-	Stop
+ENV.AutoHunterFarmStop = Stop
 
 --------------------------------------------------------------
 -- START
 --------------------------------------------------------------
 
 UpdateGUI()
-RefreshThreatCache()
 
 print("")
 print("================================================")
-print(" AUTO HUNTER SAFE FARM READY")
+print(" AUTO HUNTER REAR REACH READY")
 print("================================================")
-print("NO Freeze / NO NPC teleport")
+print("NO Auto Blood")
+print("NO Freeze")
+print("NO NPC teleport")
+print("NO attack blink")
 print("")
-print("Hunter levels:")
-print(" 100 - 300")
-print(" 400 - 900")
-print(" 1000 - 3000")
+print("Combat:")
+print(" Funcoes.Game15Fists.CombatRemote")
+print(' FireServer("Attack")')
 print("")
-print("Safety:")
-print(" - chooses safer Hunter")
-print(" - stays behind target")
-print(" - searches safest rear angle")
-print(" - retreats briefly after taking damage")
-print(" - switches away from crowded targets")
+print("Player stays behind Hunter continuously.")
+print("Auto Range searches for the farthest working distance.")
 print("")
-print("Auto Fists: ON with Auto Hunter")
-print("Auto Blood: REMOVED")
-print("Auto Money: ON")
-print("Safe Distance:", BEHIND_DISTANCE)
-print("Strike Distance:", STRIKE_DISTANCE)
-print("Auto Range:", AutoRangeEnabled)
-print("Danger Radius:", DANGER_RADIUS)
+print("Starting distance:", ATTACK_DISTANCE)
+print("Min distance:", MIN_ATTACK_DISTANCE)
+print("Max distance:", MAX_ATTACK_DISTANCE)
+print("Attack interval:", ATTACK_INTERVAL)
+print("Follow interval:", FOLLOW_INTERVAL)
+print("Auto Money:", AUTO_MONEY)
 print("================================================")
