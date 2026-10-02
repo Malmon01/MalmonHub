@@ -7,8 +7,8 @@
 --   CombatRemote:FireServer("Attack")
 --
 -- Safe-strike flow:
---   stay far behind Hunter -> blink into valid M1 range
---   -> send Attack -> instantly return to safe distance
+--   stay far behind Hunter -> lock-on inside valid M1 range for a few frames
+--   -> send Attack -> keep tracking briefly -> return to fresh safe position
 --
 -- AUTO RANGE gradually searches for the farthest strike distance
 -- that still causes damage, then backs off if hits stop landing.
@@ -115,7 +115,7 @@ local SelectedPreset = 1
 --------------------------------------------------------------
 
 -- Stay close enough for the game's real M1 distance check.
-local BEHIND_DISTANCE = 8.0
+local BEHIND_DISTANCE = 7.0
 local MIN_BEHIND_DISTANCE = 5.0
 local MAX_BEHIND_DISTANCE = 12.0
 local BEHIND_STEP = 0.50
@@ -148,10 +148,17 @@ local DAMAGE_EVADE_TIME = 0.35
 local DAMAGE_RETREAT_BONUS = 1.50
 
 -- M1 timing.
-local ATTACK_INTERVAL = 0.44
+local ATTACK_INTERVAL = 0.46
 
--- Blink into real server-side punch range only for this long.
-local ATTACK_HOLD_TIME = 0.030
+-- Give character-position replication a short head start before the
+-- attack packet reaches the server. While this window is active we
+-- continuously re-lock behind the moving Hunter.
+local STRIKE_PREP_TIME = 0.070
+local STRIKE_TRACK_AFTER_ATTACK = 0.075
+
+-- Lead the target slightly using its real AssemblyLinearVelocity.
+-- This matters most when a Hunter is sprinting away.
+local TARGET_LEAD_TIME = 0.055
 
 -- Adaptive strike reach. This is the distance used only at attack time.
 local STRIKE_DISTANCE = 3.15
@@ -161,7 +168,7 @@ local STRIKE_RANGE_STEP_UP = 0.10
 local STRIKE_RANGE_STEP_DOWN = 0.18
 
 -- Follow target / reposition speed.
-local FOLLOW_INTERVAL = 0.03
+local FOLLOW_INTERVAL = 0.02
 
 -- How often we reconsider the safest Hunter.
 local TARGET_RECHECK_INTERVAL = 0.45
@@ -993,8 +1000,21 @@ local function GetStrikeCFrame(
 		Direction = Direction.Unit
 	end
 
-	local Position =
+	local Velocity = HunterRoot.AssemblyLinearVelocity
+
+	local FlatVelocity =
+		Vector3.new(
+			Velocity.X,
+			0,
+			Velocity.Z
+		)
+
+	local PredictedTargetPosition =
 		HunterRoot.Position
+		+ FlatVelocity * TARGET_LEAD_TIME
+
+	local Position =
+		PredictedTargetPosition
 		+ Direction * STRIKE_DISTANCE
 
 	Position =
@@ -1008,7 +1028,7 @@ local function GetStrikeCFrame(
 	return
 		CFrame.lookAt(
 			Position,
-			HunterRoot.Position
+			PredictedTargetPosition
 		)
 end
 
@@ -1042,19 +1062,6 @@ local function PerformSafeStrike(
 		return false
 	end
 
-	local StrikeCFrame =
-		GetStrikeCFrame(
-			Hunter,
-			Character,
-			Humanoid,
-			PlayerRoot,
-			SafeCFrame
-		)
-
-	if not StrikeCFrame then
-		return false
-	end
-
 	local HunterHumanoid =
 		Hunter:FindFirstChildOfClass("Humanoid")
 
@@ -1063,25 +1070,148 @@ local function PerformSafeStrike(
 		and HunterHumanoid.Health
 		or nil
 
-	-- Only enter the real M1 range for the attack packet.
-	SetCharacterCFrame(
-		PlayerRoot,
-		StrikeCFrame
-	)
+	----------------------------------------------------------
+	-- LOCK-ON STRIKE PREP
+	--
+	-- Do not teleport once and immediately send the remote.
+	-- On a moving Hunter, the remote can reach the server before
+	-- the new character position has replicated. Instead we follow
+	-- the Hunter inside real M1 range for a few frames first.
+	----------------------------------------------------------
 
-	local Sent = FireAttack()
+	local PrepEnd =
+		os.clock()
+		+ STRIKE_PREP_TIME
 
-	task.wait(ATTACK_HOLD_TIME)
+	repeat
+		if not IsValidHunter(Hunter)
+			or not PlayerRoot.Parent then
 
-	-- Immediately leave NPC melee range again.
-	if PlayerRoot.Parent then
-		SetCharacterCFrame(
-			PlayerRoot,
-			SafeCFrame
-		)
+			return false
+		end
+
+		local LiveSafeCFrame =
+			select(
+				1,
+				GetSafestRearCFrame(
+					Hunter,
+					Character,
+					Humanoid,
+					PlayerRoot
+				)
+			)
+
+		LiveSafeCFrame =
+			LiveSafeCFrame
+			or SafeCFrame
+
+		local LiveStrikeCFrame =
+			GetStrikeCFrame(
+				Hunter,
+				Character,
+				Humanoid,
+				PlayerRoot,
+				LiveSafeCFrame
+			)
+
+		if LiveStrikeCFrame then
+			SetCharacterCFrame(
+				PlayerRoot,
+				LiveStrikeCFrame
+			)
+		end
+
+		RunService.Heartbeat:Wait()
+	until os.clock() >= PrepEnd
+
+	----------------------------------------------------------
+	-- ATTACK USING CURRENT GAME15 REMOTE
+	----------------------------------------------------------
+
+	local Sent =
+		FireAttack()
+
+	----------------------------------------------------------
+	-- Keep tracking briefly AFTER sending Attack as well.
+	-- This covers latency/server validation while Hunter moves.
+	----------------------------------------------------------
+
+	local TrackEnd =
+		os.clock()
+		+ STRIKE_TRACK_AFTER_ATTACK
+
+	repeat
+		if not IsValidHunter(Hunter)
+			or not PlayerRoot.Parent then
+
+			break
+		end
+
+		local LiveSafeCFrame =
+			select(
+				1,
+				GetSafestRearCFrame(
+					Hunter,
+					Character,
+					Humanoid,
+					PlayerRoot
+				)
+			)
+
+		LiveSafeCFrame =
+			LiveSafeCFrame
+			or SafeCFrame
+
+		local LiveStrikeCFrame =
+			GetStrikeCFrame(
+				Hunter,
+				Character,
+				Humanoid,
+				PlayerRoot,
+				LiveSafeCFrame
+			)
+
+		if LiveStrikeCFrame then
+			SetCharacterCFrame(
+				PlayerRoot,
+				LiveStrikeCFrame
+			)
+		end
+
+		RunService.Heartbeat:Wait()
+	until os.clock() >= TrackEnd
+
+	----------------------------------------------------------
+	-- Recompute the safe point AFTER the strike. Never return to
+	-- the old CFrame because the Hunter may have moved far away.
+	----------------------------------------------------------
+
+	if PlayerRoot.Parent
+		and IsValidHunter(Hunter) then
+
+		local FreshSafeCFrame =
+			select(
+				1,
+				GetSafestRearCFrame(
+					Hunter,
+					Character,
+					Humanoid,
+					PlayerRoot
+				)
+			)
+
+		if FreshSafeCFrame then
+			SetCharacterCFrame(
+				PlayerRoot,
+				FreshSafeCFrame
+			)
+		end
 	end
 
-	-- Check a little later whether the target actually lost HP.
+	----------------------------------------------------------
+	-- Adaptive range hit confirmation
+	----------------------------------------------------------
+
 	if Sent
 		and HPBefore
 		and HunterHumanoid then
@@ -1095,7 +1225,9 @@ local function PerformSafeStrike(
 					RegisterHitResult(
 						HunterHumanoid.Health < HPBefore
 					)
+
 				elseif HunterHumanoid.Health <= 0 then
+
 					RegisterHitResult(true)
 				end
 			end
