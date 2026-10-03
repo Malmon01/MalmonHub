@@ -8,6 +8,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
+local HttpService = game:GetService("HttpService")
 
 local Player = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
@@ -78,6 +79,106 @@ local LastDrinkCycle = os.clock()
 local StableFrames = 0
 local LastTargetHealth = nil
 local MoneyAttempt = setmetatable({}, {__mode="k"})
+
+--------------------------------------------------------------
+-- PERSISTENT SETTINGS
+--------------------------------------------------------------
+
+-- Saved in the executor workspace so settings survive leaving
+-- and rejoining the game, then running this script again.
+local SETTINGS_FILE = "auto_hunter_hit_lock_settings_v1.json"
+
+local function BuildSettingsTable()
+	return {
+		Version = 1,
+		AutoHunter = Enabled,
+		SelectedPreset = SelectedPreset,
+		FollowDistance = FOLLOW_DISTANCE,
+		AutoMoney = AUTO_MONEY,
+		AutoDrinkBlood = AUTO_DRINK_BLOOD,
+	}
+end
+
+local function SaveSettings()
+	local Data = BuildSettingsTable()
+
+	-- Same-session fallback even if file APIs are unavailable.
+	ENV.AutoHunterHitLockSavedSettings = Data
+
+	if type(writefile) ~= "function" then
+		return false
+	end
+
+	local Ok = pcall(function()
+		writefile(
+			SETTINGS_FILE,
+			HttpService:JSONEncode(Data)
+		)
+	end)
+
+	return Ok
+end
+
+local function LoadSettings()
+	local Data = nil
+
+	-- Persistent file first.
+	if type(readfile) == "function" then
+		pcall(function()
+			local Raw = readfile(SETTINGS_FILE)
+			local Decoded = HttpService:JSONDecode(Raw)
+
+			if type(Decoded) == "table" then
+				Data = Decoded
+			end
+		end)
+	end
+
+	-- Fallback for rerunning inside the same session.
+	if type(Data) ~= "table"
+		and type(ENV.AutoHunterHitLockSavedSettings) == "table" then
+
+		Data = ENV.AutoHunterHitLockSavedSettings
+	end
+
+	if type(Data) ~= "table" then
+		return false
+	end
+
+	if type(Data.AutoHunter) == "boolean" then
+		Enabled = Data.AutoHunter
+	end
+
+	local Preset = tonumber(Data.SelectedPreset)
+	if Preset then
+		SelectedPreset = math.clamp(
+			math.floor(Preset),
+			1,
+			#LEVEL_PRESETS
+		)
+	end
+
+	local Distance = tonumber(Data.FollowDistance)
+	if Distance then
+		FOLLOW_DISTANCE = math.clamp(
+			Distance,
+			MIN_FOLLOW_DISTANCE,
+			MAX_FOLLOW_DISTANCE
+		)
+	end
+
+	if type(Data.AutoMoney) == "boolean" then
+		AUTO_MONEY = Data.AutoMoney
+	end
+
+	if type(Data.AutoDrinkBlood) == "boolean" then
+		AUTO_DRINK_BLOOD = Data.AutoDrinkBlood
+	end
+
+	return true
+end
+
+local SettingsLoaded = LoadSettings()
 
 local CombatRemote = nil
 
@@ -524,6 +625,7 @@ for i,b in ipairs(levelButtons) do
 		CurrentTarget = nil
 		StableFrames = 0
 		LastTargetHealth = nil
+		SaveSettings()
 		UpdateGUI()
 	end)
 end
@@ -547,6 +649,7 @@ toggle.MouseButton1Click:Connect(function()
 		status.Text = "Stopped"
 	end
 
+	SaveSettings()
 	UpdateGUI()
 end)
 
@@ -557,6 +660,7 @@ minus.MouseButton1Click:Connect(function()
 			MIN_FOLLOW_DISTANCE,
 			MAX_FOLLOW_DISTANCE
 		)
+	SaveSettings()
 	UpdateGUI()
 end)
 
@@ -567,11 +671,13 @@ plus.MouseButton1Click:Connect(function()
 			MIN_FOLLOW_DISTANCE,
 			MAX_FOLLOW_DISTANCE
 		)
+	SaveSettings()
 	UpdateGUI()
 end)
 
 moneyBtn.MouseButton1Click:Connect(function()
 	AUTO_MONEY = not AUTO_MONEY
+	SaveSettings()
 	UpdateGUI()
 end)
 
@@ -804,6 +910,10 @@ do
 end
 
 local function Stop()
+	-- Save BEFORE changing runtime state so rerunning the script
+	-- keeps whatever the user actually had selected.
+	SaveSettings()
+
 	Running = false
 	Enabled = false
 
@@ -822,6 +932,20 @@ ENV.AutoHunterFarmStop = Stop
 
 UpdateGUI()
 
+-- Restore an ON state automatically after rejoining/rerunning.
+if Enabled then
+	ResolveCombatRemote()
+
+	local c, h = GetCharacter()
+	EquipFists(c, h)
+
+	-- Start a fresh 30-second drink countdown for the new run.
+	LastDrinkCycle = os.clock()
+	status.Text = "Saved settings loaded | Searching Hunter..."
+elseif SettingsLoaded then
+	status.Text = "Saved settings loaded | Ready"
+end
+
 print("==============================================")
 print(" AUTO HUNTER HIT LOCK READY")
 print(" Priority: HIT RELIABILITY")
@@ -831,4 +955,7 @@ print(" Stable frames:", REQUIRED_STABLE_FRAMES)
 print(" Auto punch interval:", ATTACK_INTERVAL)
 print(" Auto Drink Blood: every", DRINK_INTERVAL, "seconds")
 print(" E presses per drink cycle:", DRINK_PRESS_COUNT)
+print(" Saved settings loaded:", SettingsLoaded)
+print(" Persistent file save:", type(writefile) == "function" and type(readfile) == "function")
+print(" Settings file:", SETTINGS_FILE)
 print("==============================================")
