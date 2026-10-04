@@ -13,6 +13,153 @@ local HttpService = game:GetService("HttpService")
 local Player = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
 
+
+--------------------------------------------------------------
+-- PRIVATE SERVER LOCK
+--------------------------------------------------------------
+
+-- Behavior:
+--   Public Server              -> KICK immediately
+--   Wrong Private Server       -> KICK immediately
+--   Correct bound Private      -> continue normally
+--
+-- First setup:
+--   Run this file ONCE while inside the Private Server you want
+--   to lock this script to. Its PrivateServerId will be saved.
+--
+-- After that, the saved ID is reused across rejoins/reruns
+-- when readfile/writefile are available.
+
+local PRIVATE_LOCK_FILE =
+	"auto_hunter_private_server_lock_v1.json"
+
+local CurrentPrivateServerId =
+	tostring(game.PrivateServerId or "")
+
+local CurrentPrivateServerOwnerId =
+	tonumber(game.PrivateServerOwnerId)
+	or 0
+
+local function KickAndStop(Message)
+	pcall(function()
+		Player:Kick(Message)
+	end)
+
+	-- Stop this file even if Kick() takes a moment to disconnect.
+	return false
+end
+
+--------------------------------------------------------------
+-- PUBLIC SERVER = NEVER RUN
+--------------------------------------------------------------
+
+if CurrentPrivateServerId == "" then
+	KickAndStop(
+		"Hunter Farm is locked to your Private Server only."
+	)
+	return
+end
+
+--------------------------------------------------------------
+-- LOAD SAVED PRIVATE SERVER ID
+--------------------------------------------------------------
+
+local AllowedPrivateServerId = nil
+
+-- Same-session fallback.
+local LockEnv = _G
+
+pcall(function()
+	if getgenv then
+		LockEnv = getgenv()
+	end
+end)
+
+if type(readfile) == "function" then
+	pcall(function()
+		local Raw =
+			readfile(
+				PRIVATE_LOCK_FILE
+			)
+
+		local Data =
+			HttpService:JSONDecode(
+				Raw
+			)
+
+		if type(Data) == "table"
+			and type(Data.PrivateServerId) == "string"
+			and Data.PrivateServerId ~= "" then
+
+			AllowedPrivateServerId =
+				Data.PrivateServerId
+		end
+	end)
+end
+
+if not AllowedPrivateServerId
+	and type(
+		LockEnv.AutoHunterAllowedPrivateServerId
+	) == "string"
+	and LockEnv.AutoHunterAllowedPrivateServerId ~= "" then
+
+	AllowedPrivateServerId =
+		LockEnv.AutoHunterAllowedPrivateServerId
+end
+
+--------------------------------------------------------------
+-- FIRST PRIVATE-SERVER RUN = BIND THIS SERVER
+--------------------------------------------------------------
+
+if not AllowedPrivateServerId then
+	AllowedPrivateServerId =
+		CurrentPrivateServerId
+
+	LockEnv.AutoHunterAllowedPrivateServerId =
+		AllowedPrivateServerId
+
+	if type(writefile) == "function" then
+		pcall(function()
+			writefile(
+				PRIVATE_LOCK_FILE,
+
+				HttpService:JSONEncode({
+					Version = 1,
+					PrivateServerId =
+						AllowedPrivateServerId,
+
+					PrivateServerOwnerId =
+						CurrentPrivateServerOwnerId
+				})
+			)
+		end)
+	end
+
+	print(
+		"[Hunter Farm] Private Server bound:",
+		AllowedPrivateServerId
+	)
+end
+
+--------------------------------------------------------------
+-- WRONG PRIVATE SERVER = KICK
+--------------------------------------------------------------
+
+if CurrentPrivateServerId
+	~= AllowedPrivateServerId then
+
+	KickAndStop(
+		"Hunter Farm is locked to a different Private Server."
+	)
+	return
+end
+
+print(
+	"[Hunter Farm] Private Server verified:",
+	CurrentPrivateServerId
+)
+
+
 local ENV = _G
 pcall(function()
 	if getgenv then ENV = getgenv() end
@@ -1065,6 +1212,7 @@ elseif SettingsLoaded then
 end
 
 print("==============================================")
+print(" PRIVATE SERVER LOCK: VERIFIED")
 print(" AUTO HUNTER HIT LOCK READY")
 print(" Priority: HIT RELIABILITY")
 print(" Follow distance:", FOLLOW_DISTANCE)
