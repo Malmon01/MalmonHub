@@ -27,26 +27,23 @@ if old then old:Destroy() end
 
 
 --------------------------------------------------------------
--- PRIVATE + SOLO SERVER GUARD (SERVER-VERIFIED)
+-- SOLO SERVER GUARD
 --------------------------------------------------------------
 --
--- IMPORTANT:
--- game.PrivateServerId / PrivateServerOwnerId are not reliably
--- available to this client script. A tiny ServerScript publishes
--- the server type into ReplicatedStorage attributes instead.
+-- Only rule:
+--   There must be EXACTLY 1 player in the server: you.
 --
--- Rules:
---   Verified Private Server + only you -> run
---   Verified Public Server             -> stop + self kick
---   Private Server with 2+ players     -> stop + self kick
---   Someone joins later                -> stop + self kick
+-- If another player is already in the server when this script runs:
+--   -> stop immediately
+--   -> kick local player
 --
--- If the ServerScript marker is missing, this script STOPS
--- WITHOUT kicking. That prevents false kicks during setup.
+-- If you are alone and somebody joins later:
+--   -> stop the farm immediately
+--   -> kick local player
+--
+-- No PrivateServerId check.
+-- No server locking.
 --------------------------------------------------------------
-
-local SERVER_GUARD_READY_ATTR = "HunterServerGuardReady"
-local SERVER_IS_PRIVATE_ATTR = "HunterIsPrivateServer"
 
 local function PlayerCount()
 	return #Players:GetPlayers()
@@ -58,61 +55,21 @@ local function KickLocalPlayer(Message)
 	end)
 end
 
-local function WaitForServerGuard()
-	local Deadline = os.clock() + 10
-
-	repeat
-		if ReplicatedStorage:GetAttribute(
-			SERVER_GUARD_READY_ATTR
-		) == true then
-			return true
-		end
-
-		task.wait(0.10)
-	until os.clock() >= Deadline
-
-	return ReplicatedStorage:GetAttribute(
-		SERVER_GUARD_READY_ATTR
-	) == true
-end
-
-if not WaitForServerGuard() then
+if PlayerCount() ~= 1 then
 	warn(
-		"[Hunter Farm] Server Guard is not installed/ready. "
-		.. "Farm stopped WITHOUT kicking."
-	)
-	return
-end
-
-local ServerIsPrivate =
-	ReplicatedStorage:GetAttribute(
-		SERVER_IS_PRIVATE_ATTR
-	) == true
-
-if not ServerIsPrivate then
-	warn("[Hunter Farm] BLOCKED: Public Server")
-
-	KickLocalPlayer(
-		"Hunter Farm works only while you are alone in a Private Server."
-	)
-	return
-end
-
-if PlayerCount() > 1 then
-	warn(
-		"[Hunter Farm] BLOCKED: "
+		"[Hunter Farm] SOLO ONLY: "
 		.. tostring(PlayerCount())
-		.. " players are in this Private Server."
+		.. " players are currently in the server."
 	)
 
 	KickLocalPlayer(
-		"Hunter Farm stopped because another player is in the Private Server."
+		"Hunter Farm requires you to be the only player in the server."
 	)
+
 	return
 end
 
-print("[Hunter Farm] Server verified: PRIVATE + SOLO")
-
+print("[Hunter Farm] Solo check passed | Players: 1")
 
 local NPCS = workspace:FindFirstChild("NPCS")
 local HUNTERS = NPCS and NPCS:FindFirstChild("HUNTERS")
@@ -1147,6 +1104,7 @@ ENV.AutoHunterFarmStop = Stop
 
 --------------------------------------------------------------
 -- LIVE SOLO GUARD
+-- Any additional player = stop script + kick local player.
 --------------------------------------------------------------
 
 SoloGuardConnection =
@@ -1156,25 +1114,27 @@ SoloGuardConnection =
 		end
 
 		warn(
-			"[Hunter Farm] Another player joined: "
+			"[Hunter Farm] SOLO ONLY: "
 			.. JoinedPlayer.Name
-			.. " | stopping + leaving."
+			.. " joined the server."
 		)
 
+		-- Stop all farm connections/loops first.
 		pcall(Stop)
 
+		-- Then leave immediately.
 		KickLocalPlayer(
-			"Hunter Farm stopped because another player joined the Private Server."
+			"Hunter Farm stopped because another player joined the server."
 		)
 	end)
 
--- Close the tiny race window between startup validation
--- and connecting PlayerAdded.
-if PlayerCount() > 1 then
+-- Race-condition check in case someone joined between the first check
+-- and the PlayerAdded connection being created.
+if PlayerCount() ~= 1 then
 	pcall(Stop)
 
 	KickLocalPlayer(
-		"Hunter Farm stopped because another player is in the Private Server."
+		"Hunter Farm requires you to be the only player in the server."
 	)
 
 	return
@@ -1197,7 +1157,7 @@ elseif SettingsLoaded then
 end
 
 print("==============================================")
-print(" SERVER-VERIFIED PRIVATE + SOLO GUARD: ACTIVE")
+print(" SOLO SERVER GUARD: ACTIVE")
 print(" AUTO HUNTER HIT LOCK READY")
 print(" Priority: HIT RELIABILITY")
 print(" Follow distance:", FOLLOW_DISTANCE)
@@ -1209,4 +1169,6 @@ print(" E presses per drink cycle:", DRINK_PRESS_COUNT)
 print(" Saved settings loaded:", SettingsLoaded)
 print(" Persistent file save:", type(writefile) == "function" and type(readfile) == "function")
 print(" Settings file:", SETTINGS_FILE)
+print(" Players in server:", PlayerCount())
+print(" Rule: player count must stay exactly 1")
 print("==============================================")
