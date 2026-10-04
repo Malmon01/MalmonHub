@@ -41,8 +41,40 @@ if old then old:Destroy() end
 -- This guard only exists while this script is running.
 --------------------------------------------------------------
 
+local function GetPrivateServerState()
+	local privateId = tostring(game.PrivateServerId or "")
+	local ownerId = tonumber(game.PrivateServerOwnerId) or 0
+
+	-- VIP/Private server normally has PrivateServerId.
+	-- OwnerId is also checked as a fallback because some joins/executors
+	-- can expose one property slightly later than the other.
+	local isPrivate =
+		(privateId ~= "")
+		or (ownerId > 0)
+
+	return isPrivate, privateId, ownerId
+end
+
 local function IsPrivateServer()
-	return tostring(game.PrivateServerId or "") ~= ""
+	local isPrivate = GetPrivateServerState()
+	return isPrivate
+end
+
+local function WaitForPrivateServerState()
+	-- Give Roblox a short moment to expose the private-server properties
+	-- before deciding that this is a public server.
+	local deadline = os.clock() + 2.0
+
+	repeat
+		local isPrivate = IsPrivateServer()
+		if isPrivate then
+			return true
+		end
+
+		task.wait(0.10)
+	until os.clock() >= deadline
+
+	return IsPrivateServer()
 end
 
 local function PlayerCount()
@@ -55,8 +87,15 @@ local function KickLocalPlayer(Message)
 	end)
 end
 
-if not IsPrivateServer() then
-	warn("[Hunter Farm] BLOCKED: Public Server")
+if not WaitForPrivateServerState() then
+	local _, PrivateId, OwnerId = GetPrivateServerState()
+
+	warn(
+		"[Hunter Farm] BLOCKED: Roblox reported this as a Public Server"
+		.. " | PrivateServerId=" .. tostring(PrivateId)
+		.. " | PrivateServerOwnerId=" .. tostring(OwnerId)
+	)
+
 	KickLocalPlayer(
 		"Hunter Farm works only while you are alone in a Private Server."
 	)
@@ -1177,7 +1216,12 @@ print(" E presses per drink cycle:", DRINK_PRESS_COUNT)
 print(" Saved settings loaded:", SettingsLoaded)
 print(" Persistent file save:", type(writefile) == "function" and type(readfile) == "function")
 print(" Settings file:", SETTINGS_FILE)
-print(" Private Server:", IsPrivateServer())
+local StartupIsPrivate, StartupPrivateId, StartupOwnerId =
+	GetPrivateServerState()
+
+print(" Private Server:", StartupIsPrivate)
+print(" PrivateServerId:", StartupPrivateId ~= "" and StartupPrivateId or "<empty>")
+print(" PrivateServerOwnerId:", StartupOwnerId)
 print(" Players in server:", PlayerCount())
 print(" Rule: any additional player -> STOP + SELF KICK")
 print("==============================================")
