@@ -13,153 +13,6 @@ local HttpService = game:GetService("HttpService")
 local Player = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
 
-
---------------------------------------------------------------
--- PRIVATE SERVER LOCK
---------------------------------------------------------------
-
--- Behavior:
---   Public Server              -> KICK immediately
---   Wrong Private Server       -> KICK immediately
---   Correct bound Private      -> continue normally
---
--- First setup:
---   Run this file ONCE while inside the Private Server you want
---   to lock this script to. Its PrivateServerId will be saved.
---
--- After that, the saved ID is reused across rejoins/reruns
--- when readfile/writefile are available.
-
-local PRIVATE_LOCK_FILE =
-	"auto_hunter_private_server_lock_v1.json"
-
-local CurrentPrivateServerId =
-	tostring(game.PrivateServerId or "")
-
-local CurrentPrivateServerOwnerId =
-	tonumber(game.PrivateServerOwnerId)
-	or 0
-
-local function KickAndStop(Message)
-	pcall(function()
-		Player:Kick(Message)
-	end)
-
-	-- Stop this file even if Kick() takes a moment to disconnect.
-	return false
-end
-
---------------------------------------------------------------
--- PUBLIC SERVER = NEVER RUN
---------------------------------------------------------------
-
-if CurrentPrivateServerId == "" then
-	KickAndStop(
-		"Hunter Farm is locked to your Private Server only."
-	)
-	return
-end
-
---------------------------------------------------------------
--- LOAD SAVED PRIVATE SERVER ID
---------------------------------------------------------------
-
-local AllowedPrivateServerId = nil
-
--- Same-session fallback.
-local LockEnv = _G
-
-pcall(function()
-	if getgenv then
-		LockEnv = getgenv()
-	end
-end)
-
-if type(readfile) == "function" then
-	pcall(function()
-		local Raw =
-			readfile(
-				PRIVATE_LOCK_FILE
-			)
-
-		local Data =
-			HttpService:JSONDecode(
-				Raw
-			)
-
-		if type(Data) == "table"
-			and type(Data.PrivateServerId) == "string"
-			and Data.PrivateServerId ~= "" then
-
-			AllowedPrivateServerId =
-				Data.PrivateServerId
-		end
-	end)
-end
-
-if not AllowedPrivateServerId
-	and type(
-		LockEnv.AutoHunterAllowedPrivateServerId
-	) == "string"
-	and LockEnv.AutoHunterAllowedPrivateServerId ~= "" then
-
-	AllowedPrivateServerId =
-		LockEnv.AutoHunterAllowedPrivateServerId
-end
-
---------------------------------------------------------------
--- FIRST PRIVATE-SERVER RUN = BIND THIS SERVER
---------------------------------------------------------------
-
-if not AllowedPrivateServerId then
-	AllowedPrivateServerId =
-		CurrentPrivateServerId
-
-	LockEnv.AutoHunterAllowedPrivateServerId =
-		AllowedPrivateServerId
-
-	if type(writefile) == "function" then
-		pcall(function()
-			writefile(
-				PRIVATE_LOCK_FILE,
-
-				HttpService:JSONEncode({
-					Version = 1,
-					PrivateServerId =
-						AllowedPrivateServerId,
-
-					PrivateServerOwnerId =
-						CurrentPrivateServerOwnerId
-				})
-			)
-		end)
-	end
-
-	print(
-		"[Hunter Farm] Private Server bound:",
-		AllowedPrivateServerId
-	)
-end
-
---------------------------------------------------------------
--- WRONG PRIVATE SERVER = KICK
---------------------------------------------------------------
-
-if CurrentPrivateServerId
-	~= AllowedPrivateServerId then
-
-	KickAndStop(
-		"Hunter Farm is locked to a different Private Server."
-	)
-	return
-end
-
-print(
-	"[Hunter Farm] Private Server verified:",
-	CurrentPrivateServerId
-)
-
-
 local ENV = _G
 pcall(function()
 	if getgenv then ENV = getgenv() end
@@ -171,6 +24,59 @@ end
 
 local old = PlayerGui:FindFirstChild("AutoHunterFarmGUI")
 if old then old:Destroy() end
+
+
+--------------------------------------------------------------
+-- PRIVATE + SOLO SERVER GUARD
+--------------------------------------------------------------
+--
+-- No server ID is saved or locked anymore.
+--
+-- Rules:
+--   Private Server + only you = script may run
+--   Public Server             = stop + kick yourself
+--   Private Server with 2+    = stop + kick yourself
+--   Someone joins later       = stop immediately + kick yourself
+--
+-- This guard only exists while this script is running.
+--------------------------------------------------------------
+
+local function IsPrivateServer()
+	return tostring(game.PrivateServerId or "") ~= ""
+end
+
+local function PlayerCount()
+	return #Players:GetPlayers()
+end
+
+local function KickLocalPlayer(Message)
+	pcall(function()
+		Player:Kick(Message)
+	end)
+end
+
+if not IsPrivateServer() then
+	warn("[Hunter Farm] BLOCKED: Public Server")
+	KickLocalPlayer(
+		"Hunter Farm works only while you are alone in a Private Server."
+	)
+	return
+end
+
+if PlayerCount() > 1 then
+	warn(
+		"[Hunter Farm] BLOCKED: "
+		.. tostring(PlayerCount())
+		.. " players are already in this Private Server."
+	)
+
+	KickLocalPlayer(
+		"Hunter Farm stopped because another player is in the Private Server."
+	)
+	return
+end
+
+print("[Hunter Farm] Private + Solo check passed")
 
 local NPCS = workspace:FindFirstChild("NPCS")
 local HUNTERS = NPCS and NPCS:FindFirstChild("HUNTERS")
@@ -227,6 +133,7 @@ local LastCombatResolve = 0
 local LastDrinkCycle = os.clock()
 local LastM1Ack = 0
 local CombatFeedbackConnection = nil
+local SoloGuardConnection = nil
 local StableFrames = 0
 local LastTargetHealth = nil
 local MoneyAttempt = setmetatable({}, {__mode="k"})
@@ -1189,11 +1096,57 @@ local function Stop()
 		CombatFeedbackConnection = nil
 	end
 
+	if SoloGuardConnection then
+		pcall(function()
+			SoloGuardConnection:Disconnect()
+		end)
+		SoloGuardConnection = nil
+	end
+
 	if gui then gui:Destroy() end
 	print("[Auto Hunter Hit Lock] stopped")
 end
 
 ENV.AutoHunterFarmStop = Stop
+
+--------------------------------------------------------------
+-- LIVE SOLO GUARD
+-- If anybody else joins this Private Server, stop all loops and
+-- kick the local player immediately.
+--------------------------------------------------------------
+
+SoloGuardConnection =
+	Players.PlayerAdded:Connect(function(JoinedPlayer)
+		if JoinedPlayer == Player then
+			return
+		end
+
+		warn(
+			"[Hunter Farm] Another player joined: "
+			.. JoinedPlayer.Name
+			.. " | stopping and leaving server."
+		)
+
+		-- Stop the farm first so no Heartbeat / money / drink loops
+		-- continue while Roblox is disconnecting.
+		pcall(Stop)
+
+		KickLocalPlayer(
+			"Hunter Farm stopped: another player joined the Private Server."
+		)
+	end)
+
+-- Race-condition check: someone may have joined between the startup
+-- check and this connection being created.
+if PlayerCount() > 1 then
+	pcall(Stop)
+
+	KickLocalPlayer(
+		"Hunter Farm stopped: another player is in the Private Server."
+	)
+
+	return
+end
 
 UpdateGUI()
 
@@ -1212,7 +1165,7 @@ elseif SettingsLoaded then
 end
 
 print("==============================================")
-print(" PRIVATE SERVER LOCK: VERIFIED")
+print(" PRIVATE + SOLO SERVER GUARD: ACTIVE")
 print(" AUTO HUNTER HIT LOCK READY")
 print(" Priority: HIT RELIABILITY")
 print(" Follow distance:", FOLLOW_DISTANCE)
@@ -1224,4 +1177,7 @@ print(" E presses per drink cycle:", DRINK_PRESS_COUNT)
 print(" Saved settings loaded:", SettingsLoaded)
 print(" Persistent file save:", type(writefile) == "function" and type(readfile) == "function")
 print(" Settings file:", SETTINGS_FILE)
+print(" Private Server:", IsPrivateServer())
+print(" Players in server:", PlayerCount())
+print(" Rule: any additional player -> STOP + SELF KICK")
 print("==============================================")
