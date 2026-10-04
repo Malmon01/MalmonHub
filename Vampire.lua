@@ -47,9 +47,11 @@ local MAX_FOLLOW_DISTANCE = 3.00
 local FOLLOW_STEP = 0.10
 
 local MAX_ATTACK_DISTANCE = 2.95
--- Auto-click cadence. The game/client can still enforce its own M1 cooldown.
--- Manual clicking works in this game, so Tool:Activate() is used to mimic it.
-local ATTACK_INTERVAL = 0.10
+-- Current Game15Fists reports an M1 action length around 0.42s.
+-- Use a real simulated M1 at a slightly safer cadence.
+local ATTACK_INTERVAL = 0.44
+local M1_PRESS_TIME = 0.035
+local M1_FALLBACK_DELAY = 0.08
 local REQUIRED_STABLE_FRAMES = 3
 local TARGET_RECHECK_INTERVAL = 0.15
 local EQUIP_CHECK_INTERVAL = 0.12
@@ -76,6 +78,8 @@ local LastEquipCheck = 0
 local LastMoneyScan = 0
 local LastCombatResolve = 0
 local LastDrinkCycle = os.clock()
+local LastM1Ack = 0
+local CombatFeedbackConnection = nil
 local StableFrames = 0
 local LastTargetHealth = nil
 local MoneyAttempt = setmetatable({}, {__mode="k"})
@@ -182,13 +186,41 @@ local SettingsLoaded = LoadSettings()
 
 local CombatRemote = nil
 
+local function BindCombatFeedback(Remote)
+	if CombatFeedbackConnection then
+		pcall(function()
+			CombatFeedbackConnection:Disconnect()
+		end)
+		CombatFeedbackConnection = nil
+	end
+
+	if not Remote or not Remote:IsA("RemoteEvent") then
+		return
+	end
+
+	CombatFeedbackConnection =
+		Remote.OnClientEvent:Connect(function(Action, A, B, C)
+			-- Seen in Cobalt:
+			-- "Cooldown", "M1", timestamp
+			-- "PlayAction", LocalPlayer, "M1", 0.42
+			if Action == "Cooldown" and A == "M1" then
+				LastM1Ack = os.clock()
+			elseif Action == "PlayAction" and B == "M1" then
+				LastM1Ack = os.clock()
+			end
+		end)
+end
+
 local function ResolveCombatRemote()
 	local f = ReplicatedStorage:FindFirstChild("Fun\195\167\195\181es")
 	local g = f and f:FindFirstChild("Game15Fists")
 	local r = g and g:FindFirstChild("CombatRemote")
 
 	if r and r:IsA("RemoteEvent") then
-		CombatRemote = r
+		if CombatRemote ~= r then
+			CombatRemote = r
+			BindCombatFeedback(r)
+		end
 		return r
 	end
 
@@ -211,6 +243,15 @@ local function SetCharacterCFrame(root, cf)
 	root.CFrame = cf
 	root.AssemblyLinearVelocity = Vector3.zero
 	root.AssemblyAngularVelocity = Vector3.zero
+
+	local character = root.Parent
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if humanoid and humanoid.FloorMaterial ~= Enum.Material.Air then
+		pcall(function()
+			humanoid:ChangeState(Enum.HumanoidStateType.Running)
+		end)
+	end
+
 	return true
 end
 
@@ -306,29 +347,99 @@ local function EquipFists(c, hum)
 	return nil
 end
 
-local function RearCFrame(target)
-	local root = GetHunterRoot(target)
-	if not root then return nil end
+local function RearCFrame(target, Character, Humanoid, PlayerRoot)
+	local targetRoot = GetHunterRoot(target)
+	if not targetRoot then return nil end
 
 	-- +Z local = directly behind Hunter.
-	local pos = (root.CFrame * CFrame.new(0, 0, FOLLOW_DISTANCE)).Position
-	return CFrame.lookAt(pos, root.Position)
+	local rawPos =
+		(targetRoot.CFrame * CFrame.new(0, 0, FOLLOW_DISTANCE)).Position
+
+	-- Keep the player grounded. The current combat client can switch into
+	-- DownslamCharge/DownslamTap when it thinks the character is airborne.
+	if Character and Humanoid and PlayerRoot then
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = {Character, target}
+
+		local result =
+			workspace:Raycast(
+				rawPos + Vector3.new(0, 6, 0),
+				Vector3.new(0, -20, 0),
+				params
+			)
+
+		if result then
+			rawPos =
+				Vector3.new(
+					rawPos.X,
+					result.Position.Y
+						+ Humanoid.HipHeight
+						+ (PlayerRoot.Size.Y * 0.5),
+					rawPos.Z
+				)
+		end
+	end
+
+	return CFrame.lookAt(rawPos, targetRoot.Position)
 end
 
-local function AutoPunch(Fists)
+local function SendRealM1(Fists)
 	if not Fists
 		or not Fists.Parent then
 		return false
 	end
 
-	-- Mimic a real/manual punch. In the current Game15Fists system,
-	-- the equipped Fists client handles the normal combat flow after
-	-- Tool.Activated fires.
-	local Success = pcall(function()
-		Fists:Activate()
+	local SentAt = os.clock()
+	local Sent = false
+
+	-- GAME15CombatClient currently reacts to real M1 input. Tool:Activate()
+	-- alone no longer reliably enters the same client combat path.
+	pcall(function()
+		local Camera = workspace.CurrentCamera
+		local Viewport =
+			Camera and Camera.ViewportSize
+			or Vector2.new(1280, 720)
+
+		-- Use the far-right side of the viewport so this script's centered
+		-- settings window is not accidentally clicked.
+		local X = math.max(1, math.floor(Viewport.X - 3))
+		local Y = math.max(1, math.floor(Viewport.Y * 0.50))
+
+		VirtualInputManager:SendMouseButtonEvent(
+			X, Y, 0, true, game, 0
+		)
+
+		task.wait(M1_PRESS_TIME)
+
+		VirtualInputManager:SendMouseButtonEvent(
+			X, Y, 0, false, game, 0
+		)
+
+		Sent = true
 	end)
 
-	return Success
+	-- If the combat client did not acknowledge an M1 shortly after the
+	-- simulated click, fall back to the current server attack remote.
+	task.delay(M1_FALLBACK_DELAY, function()
+		if not Running or not Enabled then
+			return
+		end
+
+		if LastM1Ack < SentAt then
+			local Remote =
+				CombatRemote
+				or ResolveCombatRemote()
+
+			if Remote and Remote.Parent then
+				pcall(function()
+					Remote:FireServer("Attack")
+				end)
+			end
+		end
+	end)
+
+	return Sent
 end
 
 --------------------------------------------------------------
@@ -615,7 +726,7 @@ local function UpdateGUI()
 
 	remoteStatus.Text =
 		(CombatRemote and CombatRemote.Parent)
-		and "CombatRemote: READY | AUTO PUNCH ON"
+		and "CombatRemote: READY | REAL M1 AUTO"
 		or "CombatRemote: NOT FOUND"
 end
 
@@ -801,7 +912,7 @@ HeartbeatConnection = RunService.Heartbeat:Connect(function()
 		return
 	end
 
-	local rear = RearCFrame(CurrentTarget)
+	local rear = RearCFrame(CurrentTarget, c, hum, root)
 	if rear then
 		SetCharacterCFrame(root,rear)
 	end
@@ -858,11 +969,11 @@ HeartbeatConnection = RunService.Heartbeat:Connect(function()
 
 		if realDistance <= MAX_ATTACK_DISTANCE then
 			LastAttack = now
-			hitStatus.Text = "Hit status: AUTO PUNCH"
+			hitStatus.Text = "Hit status: REAL M1"
 
 			-- This is the important change:
 			-- use Tool:Activate() just like the manual click that already works.
-			AutoPunch(fists)
+			SendRealM1(fists)
 		end
 	end
 end)
@@ -924,6 +1035,13 @@ local function Stop()
 		HeartbeatConnection = nil
 	end
 
+	if CombatFeedbackConnection then
+		pcall(function()
+			CombatFeedbackConnection:Disconnect()
+		end)
+		CombatFeedbackConnection = nil
+	end
+
 	if gui then gui:Destroy() end
 	print("[Auto Hunter Hit Lock] stopped")
 end
@@ -952,7 +1070,7 @@ print(" Priority: HIT RELIABILITY")
 print(" Follow distance:", FOLLOW_DISTANCE)
 print(" Attack only <=", MAX_ATTACK_DISTANCE)
 print(" Stable frames:", REQUIRED_STABLE_FRAMES)
-print(" Auto punch interval:", ATTACK_INTERVAL)
+print(" Real M1 interval:", ATTACK_INTERVAL)
 print(" Auto Drink Blood: every", DRINK_INTERVAL, "seconds")
 print(" E presses per drink cycle:", DRINK_PRESS_COUNT)
 print(" Saved settings loaded:", SettingsLoaded)
