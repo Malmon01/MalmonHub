@@ -27,55 +27,26 @@ if old then old:Destroy() end
 
 
 --------------------------------------------------------------
--- PRIVATE + SOLO SERVER GUARD
+-- PRIVATE + SOLO SERVER GUARD (SERVER-VERIFIED)
 --------------------------------------------------------------
 --
--- No server ID is saved or locked anymore.
+-- IMPORTANT:
+-- game.PrivateServerId / PrivateServerOwnerId are not reliably
+-- available to this client script. A tiny ServerScript publishes
+-- the server type into ReplicatedStorage attributes instead.
 --
 -- Rules:
---   Private Server + only you = script may run
---   Public Server             = stop + kick yourself
---   Private Server with 2+    = stop + kick yourself
---   Someone joins later       = stop immediately + kick yourself
+--   Verified Private Server + only you -> run
+--   Verified Public Server             -> stop + self kick
+--   Private Server with 2+ players     -> stop + self kick
+--   Someone joins later                -> stop + self kick
 --
--- This guard only exists while this script is running.
+-- If the ServerScript marker is missing, this script STOPS
+-- WITHOUT kicking. That prevents false kicks during setup.
 --------------------------------------------------------------
 
-local function GetPrivateServerState()
-	local privateId = tostring(game.PrivateServerId or "")
-	local ownerId = tonumber(game.PrivateServerOwnerId) or 0
-
-	-- VIP/Private server normally has PrivateServerId.
-	-- OwnerId is also checked as a fallback because some joins/executors
-	-- can expose one property slightly later than the other.
-	local isPrivate =
-		(privateId ~= "")
-		or (ownerId > 0)
-
-	return isPrivate, privateId, ownerId
-end
-
-local function IsPrivateServer()
-	local isPrivate = GetPrivateServerState()
-	return isPrivate
-end
-
-local function WaitForPrivateServerState()
-	-- Give Roblox a short moment to expose the private-server properties
-	-- before deciding that this is a public server.
-	local deadline = os.clock() + 2.0
-
-	repeat
-		local isPrivate = IsPrivateServer()
-		if isPrivate then
-			return true
-		end
-
-		task.wait(0.10)
-	until os.clock() >= deadline
-
-	return IsPrivateServer()
-end
+local SERVER_GUARD_READY_ATTR = "HunterServerGuardReady"
+local SERVER_IS_PRIVATE_ATTR = "HunterIsPrivateServer"
 
 local function PlayerCount()
 	return #Players:GetPlayers()
@@ -87,14 +58,39 @@ local function KickLocalPlayer(Message)
 	end)
 end
 
-if not WaitForPrivateServerState() then
-	local _, PrivateId, OwnerId = GetPrivateServerState()
+local function WaitForServerGuard()
+	local Deadline = os.clock() + 10
 
+	repeat
+		if ReplicatedStorage:GetAttribute(
+			SERVER_GUARD_READY_ATTR
+		) == true then
+			return true
+		end
+
+		task.wait(0.10)
+	until os.clock() >= Deadline
+
+	return ReplicatedStorage:GetAttribute(
+		SERVER_GUARD_READY_ATTR
+	) == true
+end
+
+if not WaitForServerGuard() then
 	warn(
-		"[Hunter Farm] BLOCKED: Roblox reported this as a Public Server"
-		.. " | PrivateServerId=" .. tostring(PrivateId)
-		.. " | PrivateServerOwnerId=" .. tostring(OwnerId)
+		"[Hunter Farm] Server Guard is not installed/ready. "
+		.. "Farm stopped WITHOUT kicking."
 	)
+	return
+end
+
+local ServerIsPrivate =
+	ReplicatedStorage:GetAttribute(
+		SERVER_IS_PRIVATE_ATTR
+	) == true
+
+if not ServerIsPrivate then
+	warn("[Hunter Farm] BLOCKED: Public Server")
 
 	KickLocalPlayer(
 		"Hunter Farm works only while you are alone in a Private Server."
@@ -106,7 +102,7 @@ if PlayerCount() > 1 then
 	warn(
 		"[Hunter Farm] BLOCKED: "
 		.. tostring(PlayerCount())
-		.. " players are already in this Private Server."
+		.. " players are in this Private Server."
 	)
 
 	KickLocalPlayer(
@@ -115,7 +111,8 @@ if PlayerCount() > 1 then
 	return
 end
 
-print("[Hunter Farm] Private + Solo check passed")
+print("[Hunter Farm] Server verified: PRIVATE + SOLO")
+
 
 local NPCS = workspace:FindFirstChild("NPCS")
 local HUNTERS = NPCS and NPCS:FindFirstChild("HUNTERS")
@@ -1150,8 +1147,6 @@ ENV.AutoHunterFarmStop = Stop
 
 --------------------------------------------------------------
 -- LIVE SOLO GUARD
--- If anybody else joins this Private Server, stop all loops and
--- kick the local player immediately.
 --------------------------------------------------------------
 
 SoloGuardConnection =
@@ -1163,25 +1158,23 @@ SoloGuardConnection =
 		warn(
 			"[Hunter Farm] Another player joined: "
 			.. JoinedPlayer.Name
-			.. " | stopping and leaving server."
+			.. " | stopping + leaving."
 		)
 
-		-- Stop the farm first so no Heartbeat / money / drink loops
-		-- continue while Roblox is disconnecting.
 		pcall(Stop)
 
 		KickLocalPlayer(
-			"Hunter Farm stopped: another player joined the Private Server."
+			"Hunter Farm stopped because another player joined the Private Server."
 		)
 	end)
 
--- Race-condition check: someone may have joined between the startup
--- check and this connection being created.
+-- Close the tiny race window between startup validation
+-- and connecting PlayerAdded.
 if PlayerCount() > 1 then
 	pcall(Stop)
 
 	KickLocalPlayer(
-		"Hunter Farm stopped: another player is in the Private Server."
+		"Hunter Farm stopped because another player is in the Private Server."
 	)
 
 	return
@@ -1204,7 +1197,7 @@ elseif SettingsLoaded then
 end
 
 print("==============================================")
-print(" PRIVATE + SOLO SERVER GUARD: ACTIVE")
+print(" SERVER-VERIFIED PRIVATE + SOLO GUARD: ACTIVE")
 print(" AUTO HUNTER HIT LOCK READY")
 print(" Priority: HIT RELIABILITY")
 print(" Follow distance:", FOLLOW_DISTANCE)
@@ -1216,12 +1209,4 @@ print(" E presses per drink cycle:", DRINK_PRESS_COUNT)
 print(" Saved settings loaded:", SettingsLoaded)
 print(" Persistent file save:", type(writefile) == "function" and type(readfile) == "function")
 print(" Settings file:", SETTINGS_FILE)
-local StartupIsPrivate, StartupPrivateId, StartupOwnerId =
-	GetPrivateServerState()
-
-print(" Private Server:", StartupIsPrivate)
-print(" PrivateServerId:", StartupPrivateId ~= "" and StartupPrivateId or "<empty>")
-print(" PrivateServerOwnerId:", StartupOwnerId)
-print(" Players in server:", PlayerCount())
-print(" Rule: any additional player -> STOP + SELF KICK")
 print("==============================================")
