@@ -110,13 +110,25 @@ local MONEY_TOUCH_COOLDOWN = 0.40
 -- AUTO DRINK BLOOD
 --------------------------------------------------------------
 
--- Every 30 seconds while AUTO HUNTER is ON:
--- press E 3 times, then start a new 30-second countdown.
+-- Every 30 seconds while AUTO HUNTER is ON.
+-- Drinking is protected from M1 spam and uses retry/animation detection
+-- so E is much less likely to be missed or interrupted.
 local AUTO_DRINK_BLOOD = true
 local DRINK_INTERVAL = 30
-local DRINK_PRESS_COUNT = 3
-local DRINK_PRESS_GAP = 0.20
-local KEY_PRESS_TIME = 0.05
+
+local DRINK_MAX_E_ATTEMPTS = 5
+local DRINK_PRESS_GAP = 0.45
+local KEY_PRESS_TIME = 0.10
+
+-- Time allowed for the game to start a drink/action animation after E.
+local DRINK_ACK_WINDOW = 0.70
+local DRINK_ANIMATION_MAX_WAIT = 4.00
+
+-- If E was not acknowledged, try again soon instead of waiting 30 seconds.
+local DRINK_RETRY_DELAY = 2.00
+
+-- Short extra protection after the last E.
+local DRINK_POST_PROTECT = 0.40
 
 local LastAttack = 0
 local LastTargetRecheck = 0
@@ -125,6 +137,7 @@ local LastMoneyScan = 0
 local LastCombatResolve = 0
 local LastDrinkCycle = os.clock()
 local LastM1Ack = 0
+local DrinkingNow = false
 local CombatFeedbackConnection = nil
 local SoloGuardConnection = nil
 local StableFrames = 0
@@ -432,6 +445,10 @@ local function RearCFrame(target, Character, Humanoid, PlayerRoot)
 end
 
 local function SendRealM1(Fists)
+	if DrinkingNow then
+		return false
+	end
+
 	if not Fists
 		or not Fists.Parent then
 		return false
@@ -469,7 +486,7 @@ local function SendRealM1(Fists)
 	-- If the combat client did not acknowledge an M1 shortly after the
 	-- simulated click, fall back to the current server attack remote.
 	task.delay(M1_FALLBACK_DELAY, function()
-		if not Running or not Enabled then
+		if not Running or not Enabled or DrinkingNow then
 			return
 		end
 
@@ -496,8 +513,8 @@ end
 local function PressEOnce()
 	local sent = false
 
-	-- Preferred method.
-	pcall(function()
+	-- Preferred input path.
+	local ok = pcall(function()
 		VirtualInputManager:SendKeyEvent(
 			true,
 			Enum.KeyCode.E,
@@ -513,17 +530,19 @@ local function PressEOnce()
 			false,
 			game
 		)
-
-		sent = true
 	end)
+
+	if ok then
+		sent = true
+	end
 
 	if sent then
 		return true
 	end
 
-	-- Fallback for environments that expose keypress/keyrelease.
+	-- Fallback input path.
 	if type(keypress) == "function" then
-		pcall(function()
+		local fallbackOk = pcall(function()
 			keypress(0x45)
 			task.wait(KEY_PRESS_TIME)
 
@@ -532,24 +551,201 @@ local function PressEOnce()
 			end
 		end)
 
-		return true
+		return fallbackOk
 	end
 
 	return false
 end
 
-local function DrinkBloodCycle()
-	for i = 1, DRINK_PRESS_COUNT do
-		if not Running or not Enabled then
-			return
+local function WaitForDrinkAnimation(humanoid, timeout)
+	local animator =
+		humanoid
+		and humanoid:FindFirstChildOfClass("Animator")
+
+	if not animator then
+		return nil
+	end
+
+	local detectedTrack = nil
+	local connection
+
+	connection =
+		animator.AnimationPlayed:Connect(function(track)
+			if not DrinkingNow or detectedTrack then
+				return
+			end
+
+			-- M1 is blocked while drinking. A newly-played non-looped
+			-- animation is therefore a strong signal that E was accepted.
+			local ok, looped =
+				pcall(function()
+					return track.Looped
+				end)
+
+			if (not ok) or looped == false then
+				detectedTrack = track
+			end
+		end)
+
+	local deadline = os.clock() + timeout
+
+	while Running
+		and Enabled
+		and DrinkingNow
+		and not detectedTrack
+		and os.clock() < deadline do
+
+		task.wait(0.03)
+	end
+
+	if connection then
+		pcall(function()
+			connection:Disconnect()
+		end)
+	end
+
+	return detectedTrack
+end
+
+local function WaitForAnimationToFinish(track)
+	if not track then
+		return
+	end
+
+	local deadline =
+		os.clock()
+		+ DRINK_ANIMATION_MAX_WAIT
+
+	while Running
+		and Enabled
+		and DrinkingNow
+		and os.clock() < deadline do
+
+		local stillPlaying = false
+
+		pcall(function()
+			stillPlaying = track.IsPlaying
+		end)
+
+		if not stillPlaying then
+			break
 		end
 
-		PressEOnce()
+		task.wait(0.05)
+	end
+end
 
-		if i < DRINK_PRESS_COUNT then
+local function TryDrinkE(humanoid)
+	local detectedTrack = nil
+
+	-- Start listening BEFORE E is pressed so a fast animation
+	-- cannot begin before the listener is ready.
+	local watcher = task.spawn(function()
+		detectedTrack =
+			WaitForDrinkAnimation(
+				humanoid,
+				DRINK_ACK_WINDOW
+			)
+	end)
+
+	task.wait(0.03)
+
+	local sent = PressEOnce()
+
+	local deadline =
+		os.clock()
+		+ DRINK_ACK_WINDOW
+		+ 0.15
+
+	while Running
+		and Enabled
+		and DrinkingNow
+		and not detectedTrack
+		and os.clock() < deadline do
+
+		task.wait(0.03)
+	end
+
+	return sent, detectedTrack
+end
+
+local function DrinkBloodCycle()
+	if DrinkingNow
+		or not Running
+		or not Enabled then
+
+		return false
+	end
+
+	local character, humanoid, root =
+		GetCharacter()
+
+	if not character
+		or not humanoid
+		or humanoid.Health <= 0
+		or not root then
+
+		return false
+	end
+
+	DrinkingNow = true
+	StableFrames = 0
+
+	-- Remove leftover movement before E.
+	pcall(function()
+		root.AssemblyLinearVelocity =
+			Vector3.zero
+
+		root.AssemblyAngularVelocity =
+			Vector3.zero
+	end)
+
+	-- Let the previous punch/walk animation settle.
+	task.wait(0.15)
+
+	local successful = false
+	local sentAny = false
+
+	for attempt = 1, DRINK_MAX_E_ATTEMPTS do
+		if not Running
+			or not Enabled
+			or humanoid.Health <= 0 then
+
+			break
+		end
+
+		local sent, drinkTrack =
+			TryDrinkE(humanoid)
+
+		if sent then
+			sentAny = true
+		end
+
+		if drinkTrack then
+			successful = true
+
+			-- Do not resume M1 until drinking/action is finished.
+			WaitForAnimationToFinish(
+				drinkTrack
+			)
+
+			break
+		end
+
+		if attempt < DRINK_MAX_E_ATTEMPTS then
 			task.wait(DRINK_PRESS_GAP)
 		end
 	end
+
+	-- Prevent an immediate punch from cancelling the final E attempt.
+	if sentAny then
+		task.wait(DRINK_POST_PROTECT)
+	end
+
+	DrinkingNow = false
+	StableFrames = 0
+
+	return successful
 end
 
 --------------------------------------------------------------
@@ -900,18 +1096,29 @@ task.spawn(function()
 		if Enabled and AUTO_DRINK_BLOOD then
 			local now = os.clock()
 
-			if now - LastDrinkCycle >= DRINK_INTERVAL then
-				-- Reset the timer at the start of this cycle.
-				LastDrinkCycle = now
+			if not DrinkingNow
+				and now - LastDrinkCycle >= DRINK_INTERVAL then
 
-				-- The game's drinking animation naturally prevents punching
-				-- while the drink action is active, so the punch system itself
-				-- is intentionally left unchanged.
-				DrinkBloodCycle()
+				local success =
+					DrinkBloodCycle()
+
+				if success then
+					-- Confirmed drink:
+					-- begin the next full 30-second countdown now.
+					LastDrinkCycle =
+						os.clock()
+				else
+					-- E was not confirmed:
+					-- retry after a short delay, not after another 30 seconds.
+					LastDrinkCycle =
+						os.clock()
+						- DRINK_INTERVAL
+						+ DRINK_RETRY_DELAY
+				end
 			end
 		else
-			-- Do not let time accumulate while Auto Hunter is OFF.
 			LastDrinkCycle = os.clock()
+			DrinkingNow = false
 		end
 
 		task.wait(0.10)
@@ -962,6 +1169,15 @@ HeartbeatConnection = RunService.Heartbeat:Connect(function()
 	local rear = RearCFrame(CurrentTarget, c, hum, root)
 	if rear then
 		SetCharacterCFrame(root,rear)
+	end
+
+	-- While drinking, keep following directly behind the Hunter so
+	-- it is less likely to interrupt us, but completely block M1.
+	if DrinkingNow then
+		StableFrames = 0
+		status.Text = "Drinking blood..."
+		hitStatus.Text = "Hit status: DRINK PROTECTED"
+		return
 	end
 
 	local targetRoot = GetHunterRoot(CurrentTarget)
@@ -1165,7 +1381,8 @@ print(" Attack only <=", MAX_ATTACK_DISTANCE)
 print(" Stable frames:", REQUIRED_STABLE_FRAMES)
 print(" Real M1 interval:", ATTACK_INTERVAL)
 print(" Auto Drink Blood: every", DRINK_INTERVAL, "seconds")
-print(" E presses per drink cycle:", DRINK_PRESS_COUNT)
+print(" Drink E retry attempts:", DRINK_MAX_E_ATTEMPTS)
+print(" Drink protection: M1 paused until drink action finishes")
 print(" Saved settings loaded:", SettingsLoaded)
 print(" Persistent file save:", type(writefile) == "function" and type(readfile) == "function")
 print(" Settings file:", SETTINGS_FILE)
