@@ -209,10 +209,17 @@ local function teleportToTarget(target)
 		return false, target.Name .. " character is not ready."
 	end
 
-	-- Stay about 3 studs behind the target.
+	-- Stay about 3 studs IN FRONT of the target
+	-- and face toward them.
+	local frontPosition =
+		targetRoot.Position
+		+ (targetRoot.CFrame.LookVector * 3)
+
 	local destination =
-		targetRoot.CFrame
-		* CFrame.new(0, 0, 3)
+		CFrame.lookAt(
+			frontPosition,
+			targetRoot.Position
+		)
 
 	pcall(function()
 		myRoot.AssemblyLinearVelocity = Vector3.zero
