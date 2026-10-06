@@ -77,8 +77,8 @@ gui.IgnoreGuiInset = false
 gui.Parent = PlayerGui
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(330, 190)
-frame.Position = UDim2.new(0.5, -165, 0.5, -95)
+frame.Size = UDim2.fromOffset(330, 245)
+frame.Position = UDim2.new(0.5, -165, 0.5, -122)
 frame.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
 frame.BorderSizePixel = 0
 frame.Active = true
@@ -136,9 +136,20 @@ teleportButton.TextSize = 16
 teleportButton.Parent = frame
 Instance.new("UICorner", teleportButton).CornerRadius = UDim.new(0, 8)
 
+local loopButton = Instance.new("TextButton")
+loopButton.Size = UDim2.new(1, -28, 0, 42)
+loopButton.Position = UDim2.fromOffset(14, 158)
+loopButton.BackgroundColor3 = Color3.fromRGB(70, 70, 82)
+loopButton.Text = "LOOP : OFF"
+loopButton.TextColor3 = Color3.new(1, 1, 1)
+loopButton.Font = Enum.Font.GothamBold
+loopButton.TextSize = 16
+loopButton.Parent = frame
+Instance.new("UICorner", loopButton).CornerRadius = UDim.new(0, 8)
+
 local status = Instance.new("TextLabel")
 status.Size = UDim2.new(1, -28, 0, 24)
-status.Position = UDim2.fromOffset(14, 155)
+status.Position = UDim2.fromOffset(14, 210)
 status.BackgroundTransparency = 1
 status.Text = "Ready"
 status.TextColor3 = Color3.fromRGB(190, 190, 200)
@@ -148,6 +159,60 @@ status.TextXAlignment = Enum.TextXAlignment.Left
 status.Parent = frame
 
 local busy = false
+local loopEnabled = false
+local loopTarget = nil
+
+-- Lower = follows the player more tightly.
+local LOOP_INTERVAL = 0.08
+
+local function setLoopState(enabled)
+	loopEnabled = enabled == true
+
+	loopButton.Text =
+		loopEnabled
+		and "LOOP : ON"
+		or "LOOP : OFF"
+
+	loopButton.BackgroundColor3 =
+		loopEnabled
+		and Color3.fromRGB(45, 135, 85)
+		or Color3.fromRGB(70, 70, 82)
+
+	if not loopEnabled then
+		loopTarget = nil
+	end
+end
+
+local function teleportToTarget(target)
+	if not target or target.Parent ~= Players then
+		return false, "Player left the server."
+	end
+
+	local myRoot = getCharacterRoot(LocalPlayer)
+	local targetRoot = getCharacterRoot(target)
+
+	if not myRoot then
+		return false, "Your character is not ready."
+	end
+
+	if not targetRoot then
+		return false, target.Name .. " character is not ready."
+	end
+
+	-- Stay about 3 studs behind the target.
+	local destination =
+		targetRoot.CFrame
+		* CFrame.new(0, 0, 3)
+
+	pcall(function()
+		myRoot.AssemblyLinearVelocity = Vector3.zero
+		myRoot.AssemblyAngularVelocity = Vector3.zero
+	end)
+
+	myRoot.CFrame = destination
+
+	return true
+end
 
 local function teleportToInput()
 	if busy then
@@ -164,31 +229,13 @@ local function teleportToInput()
 		return
 	end
 
-	local myRoot = getCharacterRoot(LocalPlayer)
-	local targetRoot = getCharacterRoot(target)
+	local ok, err = teleportToTarget(target)
 
-	if not myRoot then
-		status.Text = "Your character is not ready."
+	if not ok then
+		status.Text = err or "Teleport failed."
 		busy = false
 		return
 	end
-
-	if not targetRoot then
-		status.Text = target.Name .. " character is not ready."
-		busy = false
-		return
-	end
-
-	local destination =
-		targetRoot.CFrame
-		* CFrame.new(0, 0, 3)
-
-	pcall(function()
-		myRoot.AssemblyLinearVelocity = Vector3.zero
-		myRoot.AssemblyAngularVelocity = Vector3.zero
-	end)
-
-	myRoot.CFrame = destination
 
 	status.Text =
 		"Teleported to "
@@ -202,6 +249,55 @@ end
 
 teleportButton.MouseButton1Click:Connect(teleportToInput)
 
+loopButton.MouseButton1Click:Connect(function()
+	if loopEnabled then
+		setLoopState(false)
+		status.Text = "Loop stopped."
+		return
+	end
+
+	local target = findPlayer(input.Text)
+
+	if not target then
+		status.Text = "Player not found in this server."
+		return
+	end
+
+	loopTarget = target
+	setLoopState(true)
+
+	status.Text =
+		"Looping to "
+		.. target.Name
+end)
+
+task.spawn(function()
+	while gui.Parent do
+		if loopEnabled then
+			if not loopTarget
+				or loopTarget.Parent ~= Players then
+
+				setLoopState(false)
+				status.Text = "Target left the server."
+			else
+				local ok, err =
+					teleportToTarget(loopTarget)
+
+				if ok then
+					status.Text =
+						"LOOP -> "
+						.. loopTarget.Name
+				else
+					status.Text =
+						err or "Loop teleport failed."
+				end
+			end
+		end
+
+		task.wait(LOOP_INTERVAL)
+	end
+end)
+
 input.FocusLost:Connect(function(enterPressed)
 	if enterPressed then
 		teleportToInput()
@@ -209,5 +305,6 @@ input.FocusLost:Connect(function(enterPressed)
 end)
 
 close.MouseButton1Click:Connect(function()
+	setLoopState(false)
 	gui:Destroy()
 end)
