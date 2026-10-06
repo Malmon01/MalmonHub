@@ -72,8 +72,17 @@ end
 print("[Hunter Farm] Solo check passed | Players: 1")
 
 local NPCS = workspace:FindFirstChild("NPCS")
-local HUNTERS = NPCS and NPCS:FindFirstChild("HUNTERS")
 local DROPPED_MONEY = workspace:FindFirstChild("DroppedMoney")
+
+-- Paths confirmed from the current game:
+--   Villager NPCs -> workspace.Humans.Human
+--   Guard NPCs    -> workspace.NPCS.ACTIVE_GUARDS.*
+--   Hunters       -> workspace.NPCS.HUNTERS.Hunter
+local TARGET_TYPES = {
+	"Villager",
+	"Guard",
+	"Hunter",
+}
 
 local LEVEL_PRESETS = {
 	{Name="100-300", Min=100, Max=300},
@@ -81,6 +90,7 @@ local LEVEL_PRESETS = {
 	{Name="1000-3000", Min=1000, Max=3000},
 }
 
+local SelectedTargetType = "Hunter"
 local SelectedPreset = 1
 local Enabled = false
 local Running = true
@@ -156,6 +166,7 @@ local function BuildSettingsTable()
 	return {
 		Version = 1,
 		AutoHunter = Enabled,
+		SelectedTargetType = SelectedTargetType,
 		SelectedPreset = SelectedPreset,
 		FollowDistance = FOLLOW_DISTANCE,
 		AutoMoney = AUTO_MONEY,
@@ -211,6 +222,15 @@ local function LoadSettings()
 
 	if type(Data.AutoHunter) == "boolean" then
 		Enabled = Data.AutoHunter
+	end
+
+	if type(Data.SelectedTargetType) == "string" then
+		for _, TargetName in ipairs(TARGET_TYPES) do
+			if Data.SelectedTargetType == TargetName then
+				SelectedTargetType = TargetName
+				break
+			end
+		end
 	end
 
 	local Preset = tonumber(Data.SelectedPreset)
@@ -315,72 +335,172 @@ local function SetCharacterCFrame(root, cf)
 	return true
 end
 
-local function GetHunterRoot(h)
-	if not h then return nil end
-	return h:FindFirstChild("HumanoidRootPart")
-		or h:FindFirstChild("UpperTorso")
-		or h:FindFirstChild("Torso")
-		or h.PrimaryPart
+local function GetTargetRoot(target)
+	if not target then return nil end
+
+	return target:FindFirstChild("HumanoidRootPart")
+		or target:FindFirstChild("UpperTorso")
+		or target:FindFirstChild("Torso")
+		or target.PrimaryPart
 end
 
-local function GetHunterLevel(h)
-	if not h then return nil end
+local function GetTargetLevel(target)
+	if not target then return nil end
 
 	for _, n in ipairs({"Level","Lvl","level","lvl"}) do
-		local v = h:GetAttribute(n)
-		if typeof(v) == "number" then return math.floor(v) end
-		if typeof(v) == "string" and tonumber(v) then return math.floor(tonumber(v)) end
+		local v = target:GetAttribute(n)
+
+		if typeof(v) == "number" then
+			return math.floor(v)
+		end
+
+		if typeof(v) == "string" and tonumber(v) then
+			return math.floor(tonumber(v))
+		end
 	end
 
-	for _, o in ipairs(h:GetDescendants()) do
-		if o:IsA("IntValue") or o:IsA("NumberValue") or o:IsA("StringValue") then
+	for _, o in ipairs(target:GetDescendants()) do
+		if o:IsA("IntValue")
+			or o:IsA("NumberValue")
+			or o:IsA("StringValue") then
+
 			local n = string.lower(o.Name)
+
 			if n == "level" or n == "lvl" then
 				local v = tonumber(o.Value)
-				if v then return math.floor(v) end
+
+				if v then
+					return math.floor(v)
+				end
 			end
 		end
 	end
 
-	for _, o in ipairs(h:GetDescendants()) do
-		if o:IsA("TextLabel") or o:IsA("TextButton") then
+	for _, o in ipairs(target:GetDescendants()) do
+		if o:IsA("TextLabel")
+			or o:IsA("TextButton") then
+
 			local t = tostring(o.Text)
-			local lv = string.match(t, "[Ll][Vv]%s*%.?%s*(%d+)")
+
+			local lv =
+				string.match(t, "[Ll][Vv]%s*%.?%s*(%d+)")
 				or string.match(t, "[Ll]evel%s*(%d+)")
-			if lv then return tonumber(lv) end
+
+			if lv then
+				return tonumber(lv)
+			end
 		end
 	end
 
 	return nil
 end
 
-local function IsValidHunter(h)
-	if not h or not h:IsA("Model") or h.Name ~= "Hunter" then return false end
+local function GetTargetFolder()
+	-- Refresh references in case folders are recreated.
+	NPCS = workspace:FindFirstChild("NPCS") or NPCS
 
-	local hum = h:FindFirstChildOfClass("Humanoid")
-	local root = GetHunterRoot(h)
-	if not hum or hum.Health <= 0 or not root then return false end
+	if SelectedTargetType == "Villager" then
+		return workspace:FindFirstChild("Humans")
+	end
 
-	local lv = GetHunterLevel(h)
-	if not lv then return false end
+	if SelectedTargetType == "Guard" then
+		return NPCS and NPCS:FindFirstChild("ACTIVE_GUARDS")
+	end
 
-	local p = LEVEL_PRESETS[SelectedPreset]
-	return lv >= p.Min and lv <= p.Max
+	if SelectedTargetType == "Hunter" then
+		return NPCS and NPCS:FindFirstChild("HUNTERS")
+	end
+
+	return nil
 end
 
-local function FindNearestHunter(playerRoot)
-	if not HUNTERS or not playerRoot then return nil end
+local function MatchesSelectedTarget(model)
+	if not model or not model:IsA("Model") then
+		return false
+	end
 
-	local best, bestDist = nil, math.huge
+	if SelectedTargetType == "Villager" then
+		-- Explorer shows Villagers as:
+		-- workspace.Humans.Human
+		return model.Name == "Human"
+	end
 
-	for _, h in ipairs(HUNTERS:GetChildren()) do
-		if IsValidHunter(h) then
-			local r = GetHunterRoot(h)
+	if SelectedTargetType == "Guard" then
+		-- Explorer currently shows:
+		-- SPAWN1_Guard1 ... SPAWN2_Guard4
+		return string.find(
+			string.lower(model.Name),
+			"guard",
+			1,
+			true
+		) ~= nil
+	end
+
+	if SelectedTargetType == "Hunter" then
+		-- Exact match intentionally ignores HunterBow.
+		return model.Name == "Hunter"
+	end
+
+	return false
+end
+
+local function IsValidTarget(target)
+	if not MatchesSelectedTarget(target) then
+		return false
+	end
+
+	local hum = target:FindFirstChildOfClass("Humanoid")
+	local root = GetTargetRoot(target)
+
+	if not hum
+		or hum.Health <= 0
+		or not root then
+
+		return false
+	end
+
+	-- Only Hunter uses the level selector.
+	if SelectedTargetType == "Hunter" then
+		local lv = GetTargetLevel(target)
+
+		if not lv then
+			return false
+		end
+
+		local p = LEVEL_PRESETS[SelectedPreset]
+
+		return lv >= p.Min
+			and lv <= p.Max
+	end
+
+	return true
+end
+
+local function FindNearestTarget(playerRoot)
+	if not playerRoot then
+		return nil
+	end
+
+	local folder = GetTargetFolder()
+
+	if not folder then
+		return nil
+	end
+
+	local best = nil
+	local bestDist = math.huge
+
+	for _, target in ipairs(folder:GetChildren()) do
+		if IsValidTarget(target) then
+			local r = GetTargetRoot(target)
+
 			if r then
-				local d = (r.Position - playerRoot.Position).Magnitude
+				local d =
+					(r.Position - playerRoot.Position).Magnitude
+
 				if d < bestDist then
 					bestDist = d
-					best = h
+					best = target
 				end
 			end
 		end
@@ -408,7 +528,7 @@ local function EquipFists(c, hum)
 end
 
 local function RearCFrame(target, Character, Humanoid, PlayerRoot)
-	local targetRoot = GetHunterRoot(target)
+	local targetRoot = GetTargetRoot(target)
 	if not targetRoot then return nil end
 
 	-- +Z local = directly behind Hunter.
@@ -790,7 +910,7 @@ local open = Instance.new("TextButton")
 open.Size = UDim2.fromOffset(145,44)
 open.Position = UDim2.new(0,15,0.5,-22)
 open.BackgroundColor3 = Color3.fromRGB(24,24,30)
-open.Text = "HUNTER HIT LOCK"
+open.Text = "AUTO NPC FARM"
 open.TextColor3 = Color3.new(1,1,1)
 open.Font = Enum.Font.GothamBold
 open.TextSize = 13
@@ -798,8 +918,8 @@ open.Parent = gui
 Instance.new("UICorner",open).CornerRadius = UDim.new(0,10)
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(410,430)
-frame.Position = UDim2.new(0.5,-205,0.5,-215)
+frame.Size = UDim2.fromOffset(410,510)
+frame.Position = UDim2.new(0.5,-205,0.5,-255)
 frame.BackgroundColor3 = Color3.fromRGB(18,18,24)
 frame.Visible = false
 frame.Parent = gui
@@ -809,7 +929,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1,-60,0,50)
 title.Position = UDim2.fromOffset(18,2)
 title.BackgroundTransparency = 1
-title.Text = "Auto Hunter Hit Lock"
+title.Text = "Auto NPC Farm Hit Lock"
 title.TextColor3 = Color3.new(1,1,1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 20
@@ -836,11 +956,36 @@ toggle.TextSize = 16
 toggle.Parent = frame
 Instance.new("UICorner",toggle).CornerRadius = UDim.new(0,10)
 
+local targetLabel = Instance.new("TextLabel")
+targetLabel.Size = UDim2.new(1,0,0,28)
+targetLabel.Position = UDim2.fromOffset(0,112)
+targetLabel.BackgroundTransparency = 1
+targetLabel.Text = "Target NPC"
+targetLabel.TextColor3 = Color3.new(1,1,1)
+targetLabel.Font = Enum.Font.GothamBold
+targetLabel.TextSize = 15
+targetLabel.Parent = frame
+
+local targetButtons = {}
+
+for i, TargetName in ipairs(TARGET_TYPES) do
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.new(0,115,0,38)
+	b.Position = UDim2.fromOffset(21 + ((i-1)*124),143)
+	b.Text = TargetName
+	b.TextColor3 = Color3.new(1,1,1)
+	b.Font = Enum.Font.GothamBold
+	b.TextSize = 13
+	b.Parent = frame
+	Instance.new("UICorner",b).CornerRadius = UDim.new(0,8)
+	targetButtons[i] = b
+end
+
 local lt = Instance.new("TextLabel")
 lt.Size = UDim2.new(1,0,0,28)
-lt.Position = UDim2.fromOffset(0,112)
+lt.Position = UDim2.fromOffset(0,188)
 lt.BackgroundTransparency = 1
-lt.Text = "Hunter Level"
+lt.Text = "Hunter Level (Hunter only)"
 lt.TextColor3 = Color3.new(1,1,1)
 lt.Font = Enum.Font.GothamBold
 lt.TextSize = 15
@@ -851,7 +996,7 @@ local levelButtons = {}
 for i,p in ipairs(LEVEL_PRESETS) do
 	local b = Instance.new("TextButton")
 	b.Size = UDim2.new(0,115,0,38)
-	b.Position = UDim2.fromOffset(21 + ((i-1)*124),143)
+	b.Position = UDim2.fromOffset(21 + ((i-1)*124),219)
 	b.Text = p.Name
 	b.TextColor3 = Color3.new(1,1,1)
 	b.Font = Enum.Font.GothamBold
@@ -863,7 +1008,7 @@ end
 
 local dt = Instance.new("TextLabel")
 dt.Size = UDim2.new(1,0,0,28)
-dt.Position = UDim2.fromOffset(0,194)
+dt.Position = UDim2.fromOffset(0,270)
 dt.BackgroundTransparency = 1
 dt.Text = "Hit-Lock Distance"
 dt.TextColor3 = Color3.new(1,1,1)
@@ -873,7 +1018,7 @@ dt.Parent = frame
 
 local minus = Instance.new("TextButton")
 minus.Size = UDim2.fromOffset(62,42)
-minus.Position = UDim2.fromOffset(70,224)
+minus.Position = UDim2.fromOffset(70,300)
 minus.BackgroundColor3 = Color3.fromRGB(65,65,75)
 minus.Text = "−"
 minus.TextColor3 = Color3.new(1,1,1)
@@ -884,7 +1029,7 @@ Instance.new("UICorner",minus).CornerRadius = UDim.new(0,8)
 
 local dvalue = Instance.new("TextLabel")
 dvalue.Size = UDim2.fromOffset(110,42)
-dvalue.Position = UDim2.new(0.5,-55,0,224)
+dvalue.Position = UDim2.new(0.5,-55,0,300)
 dvalue.BackgroundTransparency = 1
 dvalue.TextColor3 = Color3.new(1,1,1)
 dvalue.Font = Enum.Font.GothamBold
@@ -893,7 +1038,7 @@ dvalue.Parent = frame
 
 local plus = Instance.new("TextButton")
 plus.Size = UDim2.fromOffset(62,42)
-plus.Position = UDim2.new(1,-132,0,224)
+plus.Position = UDim2.new(1,-132,0,300)
 plus.BackgroundColor3 = Color3.fromRGB(45,155,80)
 plus.Text = "+"
 plus.TextColor3 = Color3.new(1,1,1)
@@ -904,7 +1049,7 @@ Instance.new("UICorner",plus).CornerRadius = UDim.new(0,8)
 
 local moneyBtn = Instance.new("TextButton")
 moneyBtn.Size = UDim2.new(1,-36,0,42)
-moneyBtn.Position = UDim2.fromOffset(18,286)
+moneyBtn.Position = UDim2.fromOffset(18,362)
 moneyBtn.TextColor3 = Color3.new(1,1,1)
 moneyBtn.Font = Enum.Font.GothamBold
 moneyBtn.TextSize = 14
@@ -913,7 +1058,7 @@ Instance.new("UICorner",moneyBtn).CornerRadius = UDim.new(0,9)
 
 local remoteStatus = Instance.new("TextLabel")
 remoteStatus.Size = UDim2.new(1,-20,0,27)
-remoteStatus.Position = UDim2.fromOffset(10,342)
+remoteStatus.Position = UDim2.fromOffset(10,418)
 remoteStatus.BackgroundTransparency = 1
 remoteStatus.TextColor3 = Color3.fromRGB(135,190,230)
 remoteStatus.Font = Enum.Font.GothamBold
@@ -922,7 +1067,7 @@ remoteStatus.Parent = frame
 
 local hitStatus = Instance.new("TextLabel")
 hitStatus.Size = UDim2.new(1,-20,0,27)
-hitStatus.Position = UDim2.fromOffset(10,369)
+hitStatus.Position = UDim2.fromOffset(10,445)
 hitStatus.BackgroundTransparency = 1
 hitStatus.Text = "Hit status: waiting"
 hitStatus.TextColor3 = Color3.fromRGB(175,200,145)
@@ -942,17 +1087,46 @@ status.TextWrapped = true
 status.Parent = frame
 
 local function UpdateGUI()
-	toggle.Text = Enabled and "AUTO HUNTER : ON" or "AUTO HUNTER : OFF"
+	toggle.Text = Enabled and "AUTO FARM : ON" or "AUTO FARM : OFF"
 	toggle.BackgroundColor3 =
 		Enabled
 		and Color3.fromRGB(45,155,80)
 		or Color3.fromRGB(170,55,55)
 
-	for i,b in ipairs(levelButtons) do
+	for i,b in ipairs(targetButtons) do
 		b.BackgroundColor3 =
-			(i == SelectedPreset)
+			(TARGET_TYPES[i] == SelectedTargetType)
 			and Color3.fromRGB(45,145,80)
 			or Color3.fromRGB(60,60,70)
+	end
+
+	local HunterSelected =
+		SelectedTargetType == "Hunter"
+
+	lt.Text =
+		HunterSelected
+		and "Hunter Level"
+		or "Hunter Level (Hunter only)"
+
+	lt.TextColor3 =
+		HunterSelected
+		and Color3.new(1,1,1)
+		or Color3.fromRGB(125,125,135)
+
+	for i,b in ipairs(levelButtons) do
+		b.BackgroundColor3 =
+			HunterSelected
+			and (
+				(i == SelectedPreset)
+				and Color3.fromRGB(45,145,80)
+				or Color3.fromRGB(60,60,70)
+			)
+			or Color3.fromRGB(42,42,48)
+
+		b.TextColor3 =
+			HunterSelected
+			and Color3.new(1,1,1)
+			or Color3.fromRGB(115,115,125)
 	end
 
 	dvalue.Text = string.format("%.2f", FOLLOW_DISTANCE)
@@ -973,8 +1147,30 @@ local function UpdateGUI()
 		or "CombatRemote: NOT FOUND"
 end
 
+for i,b in ipairs(targetButtons) do
+	b.MouseButton1Click:Connect(function()
+		SelectedTargetType = TARGET_TYPES[i]
+		CurrentTarget = nil
+		StableFrames = 0
+		LastTargetHealth = nil
+
+		SaveSettings()
+		UpdateGUI()
+
+		if Enabled then
+			status.Text = "Searching "..SelectedTargetType.."..."
+		else
+			status.Text = "Target: "..SelectedTargetType
+		end
+	end)
+end
+
 for i,b in ipairs(levelButtons) do
 	b.MouseButton1Click:Connect(function()
+		if SelectedTargetType ~= "Hunter" then
+			return
+		end
+
 		SelectedPreset = i
 		CurrentTarget = nil
 		StableFrames = 0
@@ -998,7 +1194,7 @@ toggle.MouseButton1Click:Connect(function()
 		-- Start a fresh 30-second drink timer each time Auto Hunter is enabled.
 		LastDrinkCycle = os.clock()
 
-		status.Text = "Searching Hunter..."
+		status.Text = "Searching "..SelectedTargetType.."..."
 	else
 		status.Text = "Stopped"
 	end
@@ -1141,7 +1337,7 @@ HeartbeatConnection = RunService.Heartbeat:Connect(function()
 		EquipFists(c,hum)
 	end
 
-	if not IsValidHunter(CurrentTarget) then
+	if not IsValidTarget(CurrentTarget) then
 		CurrentTarget = nil
 		StableFrames = 0
 		LastTargetHealth = nil
@@ -1151,7 +1347,7 @@ HeartbeatConnection = RunService.Heartbeat:Connect(function()
 		and now - LastTargetRecheck >= TARGET_RECHECK_INTERVAL then
 
 		LastTargetRecheck = now
-		CurrentTarget = FindNearestHunter(root)
+		CurrentTarget = FindNearestTarget(root)
 
 		if CurrentTarget then
 			local th = CurrentTarget:FindFirstChildOfClass("Humanoid")
@@ -1160,8 +1356,13 @@ HeartbeatConnection = RunService.Heartbeat:Connect(function()
 	end
 
 	if not CurrentTarget then
-		local p = LEVEL_PRESETS[SelectedPreset]
-		status.Text = "No Hunter Lv "..p.Name
+		if SelectedTargetType == "Hunter" then
+			local p = LEVEL_PRESETS[SelectedPreset]
+			status.Text = "No Hunter Lv "..p.Name
+		else
+			status.Text = "No "..SelectedTargetType.." found"
+		end
+
 		hitStatus.Text = "Hit status: waiting"
 		return
 	end
@@ -1171,7 +1372,7 @@ HeartbeatConnection = RunService.Heartbeat:Connect(function()
 		SetCharacterCFrame(root,rear)
 	end
 
-	-- While drinking, keep following directly behind the Hunter so
+	-- While drinking, keep following directly behind the target so
 	-- it is less likely to interrupt us, but completely block M1.
 	if DrinkingNow then
 		StableFrames = 0
@@ -1180,7 +1381,7 @@ HeartbeatConnection = RunService.Heartbeat:Connect(function()
 		return
 	end
 
-	local targetRoot = GetHunterRoot(CurrentTarget)
+	local targetRoot = GetTargetRoot(CurrentTarget)
 	local targetHum = CurrentTarget:FindFirstChildOfClass("Humanoid")
 
 	if not targetRoot or not targetHum or targetHum.Health <= 0 then
@@ -1203,15 +1404,24 @@ HeartbeatConnection = RunService.Heartbeat:Connect(function()
 		StableFrames = 0
 	end
 
-	local lv = GetHunterLevel(CurrentTarget)
+	if SelectedTargetType == "Hunter" then
+		local lv = GetTargetLevel(CurrentTarget)
 
-	status.Text =
-		"Hunter Lv "
-		.. tostring(lv or "?")
-		.. " | HP "
-		.. tostring(math.floor(targetHum.Health))
-		.. " | Dist "
-		.. string.format("%.2f",realDistance)
+		status.Text =
+			"Hunter Lv "
+			.. tostring(lv or "?")
+			.. " | HP "
+			.. tostring(math.floor(targetHum.Health))
+			.. " | Dist "
+			.. string.format("%.2f",realDistance)
+	else
+		status.Text =
+			SelectedTargetType
+			.. " | HP "
+			.. tostring(math.floor(targetHum.Health))
+			.. " | Dist "
+			.. string.format("%.2f",realDistance)
+	end
 
 	if StableFrames >= REQUIRED_STABLE_FRAMES
 		and now - LastAttack >= ATTACK_INTERVAL then
@@ -1313,7 +1523,7 @@ local function Stop()
 	end
 
 	if gui then gui:Destroy() end
-	print("[Auto Hunter Hit Lock] stopped")
+	print("[Auto NPC Farm Hit Lock] stopped")
 end
 
 ENV.AutoHunterFarmStop = Stop
@@ -1367,15 +1577,16 @@ if Enabled then
 
 	-- Start a fresh 30-second drink countdown for the new run.
 	LastDrinkCycle = os.clock()
-	status.Text = "Saved settings loaded | Searching Hunter..."
+	status.Text = "Saved settings loaded | Searching "..SelectedTargetType.."..."
 elseif SettingsLoaded then
 	status.Text = "Saved settings loaded | Ready"
 end
 
 print("==============================================")
 print(" SOLO SERVER GUARD: ACTIVE")
-print(" AUTO HUNTER HIT LOCK READY")
+print(" AUTO NPC FARM HIT LOCK READY")
 print(" Priority: HIT RELIABILITY")
+print(" Selected target:", SelectedTargetType)
 print(" Follow distance:", FOLLOW_DISTANCE)
 print(" Attack only <=", MAX_ATTACK_DISTANCE)
 print(" Stable frames:", REQUIRED_STABLE_FRAMES)
