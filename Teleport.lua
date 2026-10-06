@@ -77,7 +77,7 @@ gui.IgnoreGuiInset = false
 gui.Parent = PlayerGui
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(330, 245)
+frame.Size = UDim2.fromOffset(330, 270)
 frame.Position = UDim2.new(0.5, -165, 0.5, -122)
 frame.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
 frame.BorderSizePixel = 0
@@ -99,6 +99,16 @@ title.Font = Enum.Font.GothamBold
 title.TextSize = 20
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Parent = frame
+
+local version = Instance.new("TextLabel")
+version.Size = UDim2.fromOffset(80, 20)
+version.Position = UDim2.new(1, -128, 0, 17)
+version.BackgroundTransparency = 1
+version.Text = "LOOP V2"
+version.TextColor3 = Color3.fromRGB(120, 210, 150)
+version.Font = Enum.Font.GothamBold
+version.TextSize = 11
+version.Parent = frame
 
 local close = Instance.new("TextButton")
 close.Size = UDim2.fromOffset(34, 34)
@@ -140,7 +150,7 @@ local loopButton = Instance.new("TextButton")
 loopButton.Size = UDim2.new(1, -28, 0, 42)
 loopButton.Position = UDim2.fromOffset(14, 158)
 loopButton.BackgroundColor3 = Color3.fromRGB(70, 70, 82)
-loopButton.Text = "LOOP : OFF"
+loopButton.Text = "LOOP TELEPORT : OFF"
 loopButton.TextColor3 = Color3.new(1, 1, 1)
 loopButton.Font = Enum.Font.GothamBold
 loopButton.TextSize = 16
@@ -149,7 +159,7 @@ Instance.new("UICorner", loopButton).CornerRadius = UDim.new(0, 8)
 
 local status = Instance.new("TextLabel")
 status.Size = UDim2.new(1, -28, 0, 24)
-status.Position = UDim2.fromOffset(14, 210)
+status.Position = UDim2.fromOffset(14, 215)
 status.BackgroundTransparency = 1
 status.Text = "Ready"
 status.TextColor3 = Color3.fromRGB(190, 190, 200)
@@ -170,8 +180,8 @@ local function setLoopState(enabled)
 
 	loopButton.Text =
 		loopEnabled
-		and "LOOP : ON"
-		or "LOOP : OFF"
+		and "LOOP TELEPORT : ON"
+		or "LOOP TELEPORT : OFF"
 
 	loopButton.BackgroundColor3 =
 		loopEnabled
