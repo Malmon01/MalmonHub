@@ -3,6 +3,7 @@
 -- Supports exact or partial name matching.
 
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
@@ -104,7 +105,7 @@ local version = Instance.new("TextLabel")
 version.Size = UDim2.fromOffset(80, 20)
 version.Position = UDim2.new(1, -128, 0, 17)
 version.BackgroundTransparency = 1
-version.Text = "STABLE V3"
+version.Text = "STICK V5"
 version.TextColor3 = Color3.fromRGB(120, 210, 150)
 version.Font = Enum.Font.GothamBold
 version.TextSize = 11
@@ -171,14 +172,41 @@ status.Parent = frame
 local busy = false
 local loopEnabled = false
 local loopTarget = nil
+local loopConnection = nil
+local lastLoopUpdate = 0
 
--- Lower = follows the player more tightly.
-local LOOP_INTERVAL = 0.08
+-- LOOP runs every rendered/physics frame. This helps counter ordinary
+-- client-side rubber-banding while the loop is ON.
+local LOOP_INTERVAL = 0
+local LOOP_REPOSITION_THRESHOLD = 0.35
 
 local FRONT_DISTANCE = 3
-local STABILIZE_FRAMES = 6
+local SINGLE_TELEPORT_STABILIZE_FRAMES = 4
 local GROUND_RAY_HEIGHT = 8
 local GROUND_RAY_DEPTH = 20
+
+-- Restores ordinary movement immediately after LOOP OFF.
+local function releaseCharacter()
+	local character = LocalPlayer.Character
+	if not character then
+		return
+	end
+
+	local humanoid =
+		character:FindFirstChildOfClass("Humanoid")
+
+	if humanoid and humanoid.Health > 0 then
+		pcall(function()
+			humanoid.AutoRotate = true
+
+			if not humanoid.Sit then
+				humanoid:ChangeState(
+					Enum.HumanoidStateType.Running
+				)
+			end
+		end)
+	end
+end
 
 local function setLoopState(enabled)
 	loopEnabled = enabled == true
@@ -195,6 +223,15 @@ local function setLoopState(enabled)
 
 	if not loopEnabled then
 		loopTarget = nil
+
+		if loopConnection then
+			pcall(function()
+				loopConnection:Disconnect()
+			end)
+			loopConnection = nil
+		end
+
+		releaseCharacter()
 	end
 end
 
@@ -278,45 +315,32 @@ local function getSafeFrontDestination(targetRoot, myCharacter, myHumanoid, myRo
 	)
 end
 
-local function teleportToTarget(target)
+local function teleportToTarget(target, stabilizeFrames, isLoopMove)
 	if not target or target.Parent ~= Players then
 		return false, "Player left the server."
 	end
 
-	local myCharacter = LocalPlayer.Character
-	local myRoot = getCharacterRoot(LocalPlayer)
-	local targetRoot = getCharacterRoot(target)
+	stabilizeFrames = stabilizeFrames or 1
 
-	if not myCharacter or not myRoot then
-		return false, "Your character is not ready."
-	end
-
-	if not targetRoot then
-		return false, target.Name .. " character is not ready."
-	end
-
-	local myHumanoid =
-		myCharacter:FindFirstChildOfClass("Humanoid")
-
-	if not myHumanoid or myHumanoid.Health <= 0 then
-		return false, "Your humanoid is not ready."
-	end
-
-	-- Re-apply the teleport over several rendered frames.
-	for _ = 1, STABILIZE_FRAMES do
-		if target.Parent ~= Players then
-			return false, "Player left the server."
+	for frameIndex = 1, stabilizeFrames do
+		-- If LOOP was turned off, abort this movement immediately.
+		if isLoopMove and not loopEnabled then
+			return false, "Loop stopped."
 		end
 
-		myCharacter = LocalPlayer.Character
-		myRoot = getCharacterRoot(LocalPlayer)
-		targetRoot = getCharacterRoot(target)
+		local myCharacter = LocalPlayer.Character
+		local myRoot = getCharacterRoot(LocalPlayer)
+		local targetRoot = getCharacterRoot(target)
 
-		if not myCharacter or not myRoot or not targetRoot then
-			return false, "Character changed during teleport."
+		if not myCharacter or not myRoot then
+			return false, "Your character is not ready."
 		end
 
-		myHumanoid =
+		if not targetRoot then
+			return false, target.Name .. " character is not ready."
+		end
+
+		local myHumanoid =
 			myCharacter:FindFirstChildOfClass("Humanoid")
 
 		if not myHumanoid or myHumanoid.Health <= 0 then
@@ -332,24 +356,21 @@ local function teleportToTarget(target)
 			)
 
 		pcall(function()
-			myRoot.AssemblyLinearVelocity = Vector3.zero
-			myRoot.AssemblyAngularVelocity = Vector3.zero
+			-- Single teleport can clear residual motion.
+			-- Loop mode must NOT keep forcing velocity to zero,
+			-- because that can make character control feel stuck.
+			if not isLoopMove then
+				myRoot.AssemblyLinearVelocity = Vector3.zero
+				myRoot.AssemblyAngularVelocity = Vector3.zero
+			end
+
 			myCharacter:PivotTo(destination)
 		end)
 
-		game:GetService("RunService").RenderStepped:Wait()
-	end
-
-	pcall(function()
-		myRoot.AssemblyLinearVelocity = Vector3.zero
-		myRoot.AssemblyAngularVelocity = Vector3.zero
-
-		if myHumanoid.FloorMaterial ~= Enum.Material.Air then
-			myHumanoid:ChangeState(
-				Enum.HumanoidStateType.Running
-			)
+		if frameIndex < stabilizeFrames then
+			RunService.RenderStepped:Wait()
 		end
-	end)
+	end
 
 	return true
 end
@@ -369,7 +390,7 @@ local function teleportToInput()
 		return
 	end
 
-	local ok, err = teleportToTarget(target)
+	local ok, err = teleportToTarget(target, SINGLE_TELEPORT_STABILIZE_FRAMES, false)
 
 	if not ok then
 		status.Text = err or "Teleport failed."
@@ -392,7 +413,7 @@ teleportButton.MouseButton1Click:Connect(teleportToInput)
 loopButton.MouseButton1Click:Connect(function()
 	if loopEnabled then
 		setLoopState(false)
-		status.Text = "Loop stopped."
+		status.Text = "Loop stopped. Movement released."
 		return
 	end
 
@@ -404,38 +425,92 @@ loopButton.MouseButton1Click:Connect(function()
 	end
 
 	loopTarget = target
-	setLoopState(true)
+	loopEnabled = true
+	lastLoopUpdate = 0
 
-	status.Text =
-		"Looping to "
-		.. target.Name
-end)
+	loopButton.Text = "LOOP TELEPORT : ON"
+	loopButton.BackgroundColor3 = Color3.fromRGB(45, 135, 85)
 
-task.spawn(function()
-	while gui.Parent do
-		if loopEnabled then
+	-- One connection only. It is disconnected immediately on LOOP OFF.
+	-- While ON, we continuously rebuild the desired position in front of
+	-- the target. If Roblox/physics pulls us away, the next frame corrects it.
+	loopConnection =
+		RunService.Heartbeat:Connect(function()
+			if not loopEnabled then
+				return
+			end
+
 			if not loopTarget
 				or loopTarget.Parent ~= Players then
 
 				setLoopState(false)
 				status.Text = "Target left the server."
-			else
-				local ok, err =
-					teleportToTarget(loopTarget)
-
-				if ok then
-					status.Text =
-						"STABLE LOOP -> "
-						.. loopTarget.Name
-				else
-					status.Text =
-						err or "Loop teleport failed."
-				end
+				return
 			end
-		end
 
-		task.wait(LOOP_INTERVAL)
-	end
+			local now = os.clock()
+
+			if LOOP_INTERVAL > 0
+				and now - lastLoopUpdate < LOOP_INTERVAL then
+				return
+			end
+
+			lastLoopUpdate = now
+
+			local myCharacter = LocalPlayer.Character
+			local myRoot = getCharacterRoot(LocalPlayer)
+			local targetRoot = getCharacterRoot(loopTarget)
+
+			if not myCharacter
+				or not myRoot
+				or not targetRoot then
+
+				return
+			end
+
+			local myHumanoid =
+				myCharacter:FindFirstChildOfClass("Humanoid")
+
+			if not myHumanoid
+				or myHumanoid.Health <= 0 then
+				return
+			end
+
+			local destination =
+				getSafeFrontDestination(
+					targetRoot,
+					myCharacter,
+					myHumanoid,
+					myRoot
+				)
+
+			local distanceFromDesired =
+				(myRoot.Position - destination.Position).Magnitude
+
+			-- Reposition whenever the target moves OR whenever the client
+			-- gets pulled/rubber-banded away from the desired point.
+			if distanceFromDesired > LOOP_REPOSITION_THRESHOLD then
+				pcall(function()
+					-- Important: do NOT zero velocity here.
+					-- That was what made character control stay "stuck"
+					-- after the old loop was switched off.
+					myCharacter:PivotTo(destination)
+				end)
+			else
+				-- Keep facing the target even when already close enough.
+				pcall(function()
+					myCharacter:PivotTo(destination)
+				end)
+			end
+
+			status.Text =
+				"STICK LOOP -> "
+				.. loopTarget.Name
+		end)
+
+	status.Text =
+		"Stick-looping in front of "
+		.. target.Name
 end)
 
 input.FocusLost:Connect(function(enterPressed)
@@ -446,5 +521,6 @@ end)
 
 close.MouseButton1Click:Connect(function()
 	setLoopState(false)
+	releaseCharacter()
 	gui:Destroy()
 end)
