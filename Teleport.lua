@@ -1,130 +1,65 @@
--- OurTeleportInstaller.lua
--- ONE-FILE INSTALLER FOR ROBLOX STUDIO
+-- teleport_to_player_client_only_v7.lua
+-- Client-only teleport/follow.
 --
--- Run this from Roblox Studio Command Bar / an authorized Studio plugin context.
--- It installs/updates:
+-- NO ServerScript, NO RemoteEvent, NO server-side changes.
 --
---   ServerScriptService
---   └─ OurTeleportRuntimeServer
+-- Strategy:
+-- 1) Try small CFrame steps (not one huge jump).
+-- 2) Detect when the server/physics pulls us back.
+-- 3) Automatically fall back to Humanoid:MoveTo so normal Roblox
+--    character movement replication can keep moving toward the target.
 --
---   StarterPlayer
---   └─ StarterPlayerScripts
---      └─ OurTeleportRuntimeClient
---
--- Re-running this installer updates both scripts in place.
---
--- IMPORTANT:
--- This installer is for Studio authoring. A normal LocalScript/loadstring
--- running inside a live game cannot create a real server-running Script.
-
-local ServerScriptService = game:GetService("ServerScriptService")
-local StarterPlayer = game:GetService("StarterPlayer")
-
-local StarterPlayerScripts =
-	StarterPlayer:WaitForChild("StarterPlayerScripts")
-
-local SERVER_SCRIPT_NAME = "OurTeleportRuntimeServer"
-local CLIENT_SCRIPT_NAME = "OurTeleportRuntimeClient"
-
-local SERVER_SOURCE = [==[
--- OurTeleportRuntime.server.lua
--- Server-side teleport bridge.
---
--- IMPORTANT:
--- There is NO PrivateServerOwnerId / UserId allowlist here.
--- A player is authorized only after the companion client script
--- activates this system for THAT player during the current server session.
---
--- This means:
---   - Players who never run the client script do not get a token.
---   - Their teleport / loop requests are rejected.
---   - If another player obtains and runs the same client script,
---     they can authorize themselves too. This is runtime-gating,
---     not a secret anti-copy system.
+-- This is not a true server-authoritative teleport. If the game server
+-- rejects all client position changes, no client-only script can guarantee
+-- an instant teleport. This script tries the most reliable client-only path.
 
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
 
-local FOLDER_NAME = "OurTeleportRuntime"
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+--------------------------------------------------------------
+-- SETTINGS
+--------------------------------------------------------------
+
 local FRONT_DISTANCE = 3
-local LOOP_INTERVAL = 0.08
+
+-- CFrame movement per step.
+local STEP_DISTANCE = 2.25
+
+-- Close enough to snap directly.
+local SNAP_DISTANCE = 6
+
+-- If two consecutive CFrame steps are rejected, use MoveTo.
+local RUBBERBAND_FAILS_BEFORE_MOVETO = 2
+
+-- Loop update speed.
+local LOOP_INTERVAL = 0.05
+
+-- Single teleport safety timeout.
+local TELEPORT_TIMEOUT = 12
 
 --------------------------------------------------------------
--- REMOTES
+-- CLEAN OLD GUI
 --------------------------------------------------------------
 
-local folder = ReplicatedStorage:FindFirstChild(FOLDER_NAME)
-
-if not folder then
-	folder = Instance.new("Folder")
-	folder.Name = FOLDER_NAME
-	folder.Parent = ReplicatedStorage
+local old = PlayerGui:FindFirstChild("ClientOnlyTeleportV7")
+if old then
+	old:Destroy()
 end
 
-local function getRemote(name)
-	local remote = folder:FindFirstChild(name)
+--------------------------------------------------------------
+-- CHARACTER / TARGET HELPERS
+--------------------------------------------------------------
 
-	if remote and not remote:IsA("RemoteEvent") then
-		remote:Destroy()
-		remote = nil
-	end
-
-	if not remote then
-		remote = Instance.new("RemoteEvent")
-		remote.Name = name
-		remote.Parent = folder
-	end
-
-	return remote
+local function getCharacter(player)
+	return player and player.Character
 end
-
-local Activate = getRemote("Activate")
-local TeleportRequest = getRemote("TeleportRequest")
-local LoopRequest = getRemote("LoopRequest")
-local Status = getRemote("Status")
-
---------------------------------------------------------------
--- RUNTIME AUTH
---------------------------------------------------------------
-
-local sessions = {}
-local loopTargets = {}
-
-local function isAuthorized(player, token)
-	return player
-		and sessions[player] ~= nil
-		and type(token) == "string"
-		and token == sessions[player]
-end
-
-Activate.OnServerEvent:Connect(function(player)
-	-- New random token for this player + this server session.
-	local token =
-		HttpService:GenerateGUID(false)
-		.. "-"
-		.. HttpService:GenerateGUID(false)
-
-	sessions[player] = token
-	loopTargets[player] = nil
-
-	-- Only send the token back to the player who activated.
-	Status:FireClient(
-		player,
-		"ACTIVATED",
-		token
-	)
-end)
-
---------------------------------------------------------------
--- CHARACTER HELPERS
---------------------------------------------------------------
 
 local function getRoot(player)
-	local character = player and player.Character
-	if not character then
-		return nil
-	end
+	local character = getCharacter(player)
+	if not character then return nil end
 
 	return character:FindFirstChild("HumanoidRootPart")
 		or character:FindFirstChild("UpperTorso")
@@ -132,271 +67,9 @@ local function getRoot(player)
 end
 
 local function getHumanoid(player)
-	local character = player and player.Character
+	local character = getCharacter(player)
 	return character and character:FindFirstChildOfClass("Humanoid")
 end
-
-local function getPlayerByUserId(userId)
-	userId = tonumber(userId)
-	if not userId then
-		return nil
-	end
-
-	for _, player in ipairs(Players:GetPlayers()) do
-		if player.UserId == userId then
-			return player
-		end
-	end
-
-	return nil
-end
-
-local function buildFrontCFrame(targetRoot)
-	local frontPosition =
-		targetRoot.Position
-		+ targetRoot.CFrame.LookVector * FRONT_DISTANCE
-
-	return CFrame.lookAt(
-		frontPosition,
-		targetRoot.Position
-	)
-end
-
-local function serverTeleport(player, target)
-	if not player or not target or target == player then
-		return false, "Invalid target."
-	end
-
-	if target.Parent ~= Players then
-		return false, "Target left the server."
-	end
-
-	local character = player.Character
-	local root = getRoot(player)
-	local targetRoot = getRoot(target)
-	local humanoid = getHumanoid(player)
-
-	if not character
-		or not root
-		or not targetRoot
-		or not humanoid
-		or humanoid.Health <= 0 then
-
-		return false, "Character is not ready."
-	end
-
-	-- Server-authoritative move.
-	character:PivotTo(
-		buildFrontCFrame(targetRoot)
-	)
-
-	return true
-end
-
---------------------------------------------------------------
--- SINGLE TELEPORT
---------------------------------------------------------------
-
-TeleportRequest.OnServerEvent:Connect(
-	function(player, token, targetUserId)
-		if not isAuthorized(player, token) then
-			Status:FireClient(
-				player,
-				"DENIED",
-				"Run/activate the teleport client first."
-			)
-			return
-		end
-
-		local target =
-			getPlayerByUserId(targetUserId)
-
-		local ok, message =
-			serverTeleport(player, target)
-
-		Status:FireClient(
-			player,
-			ok and "INFO" or "ERROR",
-			ok
-				and ("Teleported to " .. target.Name)
-				or (message or "Teleport failed.")
-		)
-	end
-)
-
---------------------------------------------------------------
--- LOOP TELEPORT
---------------------------------------------------------------
-
-LoopRequest.OnServerEvent:Connect(
-	function(player, token, enabled, targetUserId)
-		if not isAuthorized(player, token) then
-			loopTargets[player] = nil
-
-			Status:FireClient(
-				player,
-				"DENIED",
-				"Run/activate the teleport client first."
-			)
-			return
-		end
-
-		if enabled ~= true then
-			loopTargets[player] = nil
-
-			Status:FireClient(
-				player,
-				"INFO",
-				"Loop stopped."
-			)
-			return
-		end
-
-		local target =
-			getPlayerByUserId(targetUserId)
-
-		if not target or target == player then
-			loopTargets[player] = nil
-
-			Status:FireClient(
-				player,
-				"ERROR",
-				"Target is not available."
-			)
-			return
-		end
-
-		loopTargets[player] = target
-
-		Status:FireClient(
-			player,
-			"INFO",
-			"Looping to " .. target.Name
-		)
-	end
-)
-
-task.spawn(function()
-	while true do
-		for player, target in pairs(loopTargets) do
-			if player.Parent ~= Players
-				or not sessions[player] then
-
-				loopTargets[player] = nil
-
-			elseif not target
-				or target.Parent ~= Players then
-
-				loopTargets[player] = nil
-
-				if player.Parent == Players then
-					Status:FireClient(
-						player,
-						"ERROR",
-						"Target left the server."
-					)
-				end
-
-			else
-				serverTeleport(player, target)
-			end
-		end
-
-		task.wait(LOOP_INTERVAL)
-	end
-end)
-
-Players.PlayerRemoving:Connect(function(player)
-	sessions[player] = nil
-	loopTargets[player] = nil
-
-	for owner, target in pairs(loopTargets) do
-		if target == player then
-			loopTargets[owner] = nil
-		end
-	end
-end)
-
-print("[OurTeleportRuntime] Server bridge ready.")
-
-]==]
-
-local CLIENT_SOURCE = [==[
--- OurTeleportRuntime.client.lua
--- Only the client that RUNS this script gets activated for this server session.
---
--- This client creates a LOCAL folder in ReplicatedStorage for its own state.
--- It then requests a random per-session token from the server bridge.
---
--- If another player never runs this script, they do not receive a token
--- and their teleport requests are rejected by the server.
-
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
-local LocalPlayer = Players.LocalPlayer
-local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
-
-local SERVER_FOLDER = "OurTeleportRuntime"
-
---------------------------------------------------------------
--- SERVER BRIDGE
---------------------------------------------------------------
-
-local folder =
-	ReplicatedStorage:WaitForChild(
-		SERVER_FOLDER,
-		10
-	)
-
-if not folder then
-	warn(
-		"[OurTeleport] Server bridge missing. "
-		.. "Install OurTeleportRuntime.server.lua in ServerScriptService."
-	)
-	return
-end
-
-local Activate = folder:WaitForChild("Activate")
-local TeleportRequest = folder:WaitForChild("TeleportRequest")
-local LoopRequest = folder:WaitForChild("LoopRequest")
-local StatusRemote = folder:WaitForChild("Status")
-
---------------------------------------------------------------
--- CLIENT-ONLY FOLDER
---------------------------------------------------------------
-
-local localFolder =
-	ReplicatedStorage:FindFirstChild(
-		"OurTeleportClient"
-	)
-
-if localFolder then
-	localFolder:Destroy()
-end
-
-localFolder = Instance.new("Folder")
-localFolder.Name = "OurTeleportClient"
-localFolder.Parent = ReplicatedStorage
-
-local targetValue = Instance.new("IntValue")
-targetValue.Name = "SelectedTargetUserId"
-targetValue.Value = 0
-targetValue.Parent = localFolder
-
-local loopValue = Instance.new("BoolValue")
-loopValue.Name = "LoopEnabled"
-loopValue.Value = false
-loopValue.Parent = localFolder
-
-local activeValue = Instance.new("BoolValue")
-activeValue.Name = "Activated"
-activeValue.Value = false
-activeValue.Parent = localFolder
-
---------------------------------------------------------------
--- PLAYER SEARCH
---------------------------------------------------------------
 
 local function trim(value)
 	return (
@@ -456,39 +129,127 @@ local function findPlayer(input)
 	return nil
 end
 
+local function getFrontCFrame(targetRoot)
+	local front =
+		targetRoot.Position
+		+ targetRoot.CFrame.LookVector * FRONT_DISTANCE
+
+	return CFrame.lookAt(
+		front,
+		targetRoot.Position
+	)
+end
+
+--------------------------------------------------------------
+-- CLIENT MOVEMENT
+--------------------------------------------------------------
+
+local function stopHumanoidMove()
+	local humanoid = getHumanoid(LocalPlayer)
+	local root = getRoot(LocalPlayer)
+
+	if humanoid and root then
+		pcall(function()
+			humanoid:MoveTo(root.Position)
+		end)
+	end
+end
+
+local function cframeStepToward(target)
+	local root = getRoot(LocalPlayer)
+	local targetRoot = getRoot(target)
+
+	if not root or not targetRoot then
+		return false, "Character not ready", false
+	end
+
+	local wanted = getFrontCFrame(targetRoot)
+	local delta = wanted.Position - root.Position
+	local distance = delta.Magnitude
+
+	if distance <= SNAP_DISTANCE then
+		local before = root.Position
+
+		root.CFrame = wanted
+
+		RunService.Heartbeat:Wait()
+
+		local after = root.Position
+		local madeProgress =
+			(after - before).Magnitude > 0.35
+			or (after - wanted.Position).Magnitude < SNAP_DISTANCE
+
+		return true, "SNAP", not madeProgress
+	end
+
+	local direction = delta.Unit
+	local stepDistance = math.min(STEP_DISTANCE, distance)
+
+	local before = root.Position
+	local nextPosition =
+		before + direction * stepDistance
+
+	root.CFrame =
+		CFrame.lookAt(
+			nextPosition,
+			targetRoot.Position
+		)
+
+	-- Give replication/physics one frame to react.
+	RunService.Heartbeat:Wait()
+
+	local after = root.Position
+	local progress =
+		(after - before):Dot(direction)
+
+	-- Little/no forward progress = likely rubber-band correction.
+	local rubberband =
+		progress < math.max(0.20, stepDistance * 0.15)
+
+	return true, "STEP", rubberband
+end
+
+local function moveToFallback(target)
+	local humanoid = getHumanoid(LocalPlayer)
+	local targetRoot = getRoot(target)
+
+	if not humanoid or not targetRoot then
+		return false
+	end
+
+	local wanted = getFrontCFrame(targetRoot)
+
+	pcall(function()
+		humanoid:MoveTo(wanted.Position)
+	end)
+
+	return true
+end
+
 --------------------------------------------------------------
 -- GUI
 --------------------------------------------------------------
 
-local old =
-	PlayerGui:FindFirstChild(
-		"OurTeleportRuntimeGUI"
-	)
-
-if old then
-	old:Destroy()
-end
-
 local gui = Instance.new("ScreenGui")
-gui.Name = "OurTeleportRuntimeGUI"
+gui.Name = "ClientOnlyTeleportV7"
 gui.ResetOnSpawn = false
 gui.Parent = PlayerGui
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(350,275)
-frame.Position = UDim2.new(0.5,-175,0.5,-137)
-frame.BackgroundColor3 = Color3.fromRGB(28,28,34)
+frame.Size = UDim2.fromOffset(350, 292)
+frame.Position = UDim2.new(0.5, -175, 0.5, -146)
+frame.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
 frame.BorderSizePixel = 0
 frame.Active = true
 frame.Draggable = true
 frame.Parent = gui
-Instance.new("UICorner",frame).CornerRadius = UDim.new(0,12)
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
 
 local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1,-60,0,42)
-title.Position = UDim2.fromOffset(14,6)
+title.Size = UDim2.new(1, -55, 0, 42)
+title.Position = UDim2.fromOffset(14, 6)
 title.BackgroundTransparency = 1
-title.Text = "Runtime Teleport"
+title.Text = "Client Teleport"
 title.TextColor3 = Color3.new(1,1,1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 20
@@ -496,10 +257,10 @@ title.TextXAlignment = Enum.TextXAlignment.Left
 title.Parent = frame
 
 local badge = Instance.new("TextLabel")
-badge.Size = UDim2.fromOffset(105,20)
-badge.Position = UDim2.new(1,-155,0,17)
+badge.Size = UDim2.fromOffset(98,20)
+badge.Position = UDim2.new(1,-148,0,17)
 badge.BackgroundTransparency = 1
-badge.Text = "RUNNER ONLY"
+badge.Text = "CLIENT V7"
 badge.TextColor3 = Color3.fromRGB(120,210,150)
 badge.Font = Enum.Font.GothamBold
 badge.TextSize = 10
@@ -514,7 +275,7 @@ close.TextColor3 = Color3.new(1,1,1)
 close.Font = Enum.Font.GothamBold
 close.TextSize = 16
 close.Parent = frame
-Instance.new("UICorner",close).CornerRadius = UDim.new(0,8)
+Instance.new("UICorner", close).CornerRadius = UDim.new(0,8)
 
 local input = Instance.new("TextBox")
 input.Size = UDim2.new(1,-28,0,42)
@@ -528,35 +289,35 @@ input.PlaceholderColor3 = Color3.fromRGB(155,155,165)
 input.Font = Enum.Font.Gotham
 input.TextSize = 16
 input.Parent = frame
-Instance.new("UICorner",input).CornerRadius = UDim.new(0,8)
+Instance.new("UICorner", input).CornerRadius = UDim.new(0,8)
 
 local teleportButton = Instance.new("TextButton")
 teleportButton.Size = UDim2.new(1,-28,0,42)
 teleportButton.Position = UDim2.fromOffset(14,110)
 teleportButton.BackgroundColor3 = Color3.fromRGB(45,135,85)
-teleportButton.Text = "TELEPORT"
+teleportButton.Text = "TELEPORT / ADAPTIVE"
 teleportButton.TextColor3 = Color3.new(1,1,1)
 teleportButton.Font = Enum.Font.GothamBold
 teleportButton.TextSize = 16
 teleportButton.Parent = frame
-Instance.new("UICorner",teleportButton).CornerRadius = UDim.new(0,8)
+Instance.new("UICorner", teleportButton).CornerRadius = UDim.new(0,8)
 
 local loopButton = Instance.new("TextButton")
 loopButton.Size = UDim2.new(1,-28,0,42)
 loopButton.Position = UDim2.fromOffset(14,160)
 loopButton.BackgroundColor3 = Color3.fromRGB(70,70,82)
-loopButton.Text = "LOOP TELEPORT : OFF"
+loopButton.Text = "LOOP : OFF"
 loopButton.TextColor3 = Color3.new(1,1,1)
 loopButton.Font = Enum.Font.GothamBold
 loopButton.TextSize = 16
 loopButton.Parent = frame
-Instance.new("UICorner",loopButton).CornerRadius = UDim.new(0,8)
+Instance.new("UICorner", loopButton).CornerRadius = UDim.new(0,8)
 
 local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1,-28,0,52)
-status.Position = UDim2.fromOffset(14,210)
+status.Size = UDim2.new(1,-28,0,68)
+status.Position = UDim2.fromOffset(14,212)
 status.BackgroundTransparency = 1
-status.Text = "Activating this client..."
+status.Text = "Ready | CFrame steps + MoveTo fallback"
 status.TextWrapped = true
 status.TextColor3 = Color3.fromRGB(190,190,200)
 status.Font = Enum.Font.Gotham
@@ -566,216 +327,220 @@ status.TextYAlignment = Enum.TextYAlignment.Top
 status.Parent = frame
 
 --------------------------------------------------------------
--- RUNTIME TOKEN
+-- RUNTIME STATE
 --------------------------------------------------------------
 
-local sessionToken = nil
+local loopEnabled = false
+local loopTarget = nil
+local loopConnection = nil
+local loopGeneration = 0
+local singleGeneration = 0
+local consecutiveRubberbands = 0
+local lastLoopTick = 0
 
-local function updateLoopButton()
-	loopButton.Text =
-		loopValue.Value
-		and "LOOP TELEPORT : ON"
-		or "LOOP TELEPORT : OFF"
+local function stopLoop()
+	loopEnabled = false
+	loopTarget = nil
+	loopGeneration += 1
+	consecutiveRubberbands = 0
 
-	loopButton.BackgroundColor3 =
-		loopValue.Value
-		and Color3.fromRGB(45,135,85)
-		or Color3.fromRGB(70,70,82)
+	if loopConnection then
+		pcall(function()
+			loopConnection:Disconnect()
+		end)
+		loopConnection = nil
+	end
+
+	stopHumanoidMove()
+
+	loopButton.Text = "LOOP : OFF"
+	loopButton.BackgroundColor3 = Color3.fromRGB(70,70,82)
 end
 
-local function selectTarget()
+local function startLoop(target)
+	stopLoop()
+
+	loopEnabled = true
+	loopTarget = target
+	loopGeneration += 1
+
+	local generation = loopGeneration
+	lastLoopTick = 0
+	consecutiveRubberbands = 0
+
+	loopButton.Text = "LOOP : ON"
+	loopButton.BackgroundColor3 = Color3.fromRGB(45,135,85)
+
+	loopConnection =
+		RunService.Heartbeat:Connect(function()
+			if not loopEnabled
+				or generation ~= loopGeneration then
+				return
+			end
+
+			if not loopTarget
+				or loopTarget.Parent ~= Players then
+
+				stopLoop()
+				status.Text = "Target left the server."
+				return
+			end
+
+			local now = os.clock()
+			if now - lastLoopTick < LOOP_INTERVAL then
+				return
+			end
+			lastLoopTick = now
+
+			local ok, mode, rubberband =
+				cframeStepToward(loopTarget)
+
+			if not ok then
+				status.Text = tostring(mode)
+				return
+			end
+
+			if rubberband then
+				consecutiveRubberbands += 1
+			else
+				consecutiveRubberbands = 0
+			end
+
+			if consecutiveRubberbands
+				>= RUBBERBAND_FAILS_BEFORE_MOVETO then
+
+				moveToFallback(loopTarget)
+
+				status.Text =
+					"LOOP: server correction detected -> MoveTo fallback"
+			else
+				status.Text =
+					"LOOP "
+					.. tostring(mode)
+					.. " -> "
+					.. loopTarget.Name
+			end
+		end)
+end
+
+--------------------------------------------------------------
+-- BUTTONS
+--------------------------------------------------------------
+
+teleportButton.MouseButton1Click:Connect(function()
 	local target = findPlayer(input.Text)
 
 	if not target then
 		status.Text = "Player not found in this server."
-		return nil
-	end
-
-	targetValue.Value = target.UserId
-	return target
-end
-
-StatusRemote.OnClientEvent:Connect(
-	function(kind, message)
-		if kind == "ACTIVATED" then
-			sessionToken = tostring(message)
-			activeValue.Value = true
-			status.Text = "Activated for this client session."
-			return
-		end
-
-		status.Text = tostring(message or kind)
-
-		if tostring(message):lower():find(
-			"loop stopped",
-			1,
-			true
-		) then
-			loopValue.Value = false
-			updateLoopButton()
-		end
-	end
-)
-
--- Running this script is what activates this player.
-Activate:FireServer()
-
---------------------------------------------------------------
--- ACTIONS
---------------------------------------------------------------
-
-teleportButton.MouseButton1Click:Connect(function()
-	if not sessionToken then
-		status.Text = "Still activating..."
 		return
 	end
 
-	local target = selectTarget()
-	if not target then
-		return
-	end
+	singleGeneration += 1
+	local generation = singleGeneration
 
-	TeleportRequest:FireServer(
-		sessionToken,
-		target.UserId
-	)
+	status.Text =
+		"Moving to "
+		.. target.Name
+		.. "..."
+
+	task.spawn(function()
+		local startTime = os.clock()
+		local failures = 0
+
+		while generation == singleGeneration
+			and target.Parent == Players
+			and os.clock() - startTime < TELEPORT_TIMEOUT do
+
+			local myRoot = getRoot(LocalPlayer)
+			local targetRoot = getRoot(target)
+
+			if not myRoot or not targetRoot then
+				status.Text = "Character not ready."
+				return
+			end
+
+			local wanted = getFrontCFrame(targetRoot)
+			local distance =
+				(myRoot.Position - wanted.Position).Magnitude
+
+			if distance <= 3.5 then
+				myRoot.CFrame = wanted
+				stopHumanoidMove()
+
+				status.Text =
+					"Reached "
+					.. target.Name
+				return
+			end
+
+			local ok, mode, rubberband =
+				cframeStepToward(target)
+
+			if not ok then
+				status.Text = tostring(mode)
+				return
+			end
+
+			if rubberband then
+				failures += 1
+			else
+				failures = 0
+			end
+
+			if failures
+				>= RUBBERBAND_FAILS_BEFORE_MOVETO then
+
+				moveToFallback(target)
+
+				status.Text =
+					"Rubber-band detected -> normal MoveTo fallback"
+
+				task.wait(0.15)
+			end
+
+			RunService.Heartbeat:Wait()
+		end
+
+		if generation == singleGeneration then
+			status.Text =
+				"Could not reach target client-only."
+		end
+	end)
 end)
 
 loopButton.MouseButton1Click:Connect(function()
-	if not sessionToken then
-		status.Text = "Still activating..."
+	if loopEnabled then
+		stopLoop()
+		status.Text = "Loop stopped. No movement task remains."
 		return
 	end
 
-	if loopValue.Value then
-		loopValue.Value = false
-		updateLoopButton()
+	local target = findPlayer(input.Text)
 
-		LoopRequest:FireServer(
-			sessionToken,
-			false,
-			0
-		)
-
-		return
-	end
-
-	local target = selectTarget()
 	if not target then
+		status.Text = "Player not found in this server."
 		return
 	end
 
-	loopValue.Value = true
-	updateLoopButton()
-
-	LoopRequest:FireServer(
-		sessionToken,
-		true,
-		target.UserId
-	)
+	startLoop(target)
+	status.Text = "Looping to " .. target.Name
 end)
 
 input.FocusLost:Connect(function(enterPressed)
-	if enterPressed
-		and sessionToken then
-
-		local target = selectTarget()
-
-		if target then
-			TeleportRequest:FireServer(
-				sessionToken,
-				target.UserId
-			)
-		end
+	if enterPressed then
+		teleportButton:Activate()
 	end
 end)
 
 Players.PlayerRemoving:Connect(function(player)
-	if player.UserId == targetValue.Value then
-		targetValue.Value = 0
-		loopValue.Value = false
-		updateLoopButton()
+	if player == loopTarget then
+		stopLoop()
+		status.Text = "Target left the server."
 	end
 end)
 
 close.MouseButton1Click:Connect(function()
-	if sessionToken and loopValue.Value then
-		LoopRequest:FireServer(
-			sessionToken,
-			false,
-			0
-		)
-	end
-
-	loopValue.Value = false
+	singleGeneration += 1
+	stopLoop()
 	gui:Destroy()
 end)
-
-updateLoopButton()
-
-]==]
-
-local function installScript(parent, className, name, source)
-	local existing = parent:FindFirstChild(name)
-
-	if existing and not existing:IsA(className) then
-		existing:Destroy()
-		existing = nil
-	end
-
-	local object = existing
-
-	if not object then
-		object = Instance.new(className)
-		object.Name = name
-		object.Parent = parent
-	end
-
-	local ok, err = pcall(function()
-		object.Source = source
-	end)
-
-	if not ok then
-		error(
-			"Could not write Source for "
-			.. name
-			.. ". Run this installer from Roblox Studio Command Bar "
-			.. "or an authorized Studio plugin context.\n"
-			.. tostring(err)
-		)
-	end
-
-	object.Disabled = false
-
-	return object
-end
-
-print("==============================================")
-print(" Installing OurTeleport Runtime...")
-print("==============================================")
-
-local serverScript =
-	installScript(
-		ServerScriptService,
-		"Script",
-		SERVER_SCRIPT_NAME,
-		SERVER_SOURCE
-	)
-
-local clientScript =
-	installScript(
-		StarterPlayerScripts,
-		"LocalScript",
-		CLIENT_SCRIPT_NAME,
-		CLIENT_SOURCE
-	)
-
-print("Installed / updated:")
-print(" - " .. serverScript:GetFullName())
-print(" - " .. clientScript:GetFullName())
-print("")
-print("Next:")
-print(" 1) Publish the place")
-print(" 2) Start a fresh server")
-print(" 3) The client GUI will be installed automatically for players")
-print("==============================================")
