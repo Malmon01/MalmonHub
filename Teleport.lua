@@ -104,7 +104,7 @@ local version = Instance.new("TextLabel")
 version.Size = UDim2.fromOffset(80, 20)
 version.Position = UDim2.new(1, -128, 0, 17)
 version.BackgroundTransparency = 1
-version.Text = "LOOP V2"
+version.Text = "STABLE V3"
 version.TextColor3 = Color3.fromRGB(120, 210, 150)
 version.Font = Enum.Font.GothamBold
 version.TextSize = 11
@@ -175,6 +175,11 @@ local loopTarget = nil
 -- Lower = follows the player more tightly.
 local LOOP_INTERVAL = 0.08
 
+local FRONT_DISTANCE = 3
+local STABILIZE_FRAMES = 6
+local GROUND_RAY_HEIGHT = 8
+local GROUND_RAY_DEPTH = 20
+
 local function setLoopState(enabled)
 	loopEnabled = enabled == true
 
@@ -193,15 +198,96 @@ local function setLoopState(enabled)
 	end
 end
 
+local function getSafeFrontDestination(targetRoot, myCharacter, myHumanoid, myRoot)
+	local desiredPosition =
+		targetRoot.Position
+		+ (targetRoot.CFrame.LookVector * FRONT_DISTANCE)
+
+	-- Avoid placing the character inside a wall/object.
+	local obstacleParams = RaycastParams.new()
+	obstacleParams.FilterType = Enum.RaycastFilterType.Exclude
+	obstacleParams.FilterDescendantsInstances = {
+		targetRoot.Parent,
+		myCharacter,
+	}
+
+	local obstacleDirection =
+		desiredPosition - targetRoot.Position
+
+	local obstacleHit =
+		workspace:Raycast(
+			targetRoot.Position,
+			obstacleDirection,
+			obstacleParams
+		)
+
+	if obstacleHit then
+		local safeDistance =
+			math.max(
+				0.9,
+				obstacleHit.Distance - 0.75
+			)
+
+		desiredPosition =
+			targetRoot.Position
+			+ (
+				targetRoot.CFrame.LookVector
+				* safeDistance
+			)
+	end
+
+	-- Correct Y position to the ground.
+	local groundParams = RaycastParams.new()
+	groundParams.FilterType = Enum.RaycastFilterType.Exclude
+	groundParams.FilterDescendantsInstances = {
+		targetRoot.Parent,
+		myCharacter,
+	}
+
+	local rayOrigin =
+		desiredPosition
+		+ Vector3.new(0, GROUND_RAY_HEIGHT, 0)
+
+	local groundHit =
+		workspace:Raycast(
+			rayOrigin,
+			Vector3.new(0, -GROUND_RAY_DEPTH, 0),
+			groundParams
+		)
+
+	if groundHit then
+		local rootHalf = myRoot.Size.Y * 0.5
+		local hipHeight = myHumanoid.HipHeight or 0
+
+		desiredPosition =
+			Vector3.new(
+				desiredPosition.X,
+				groundHit.Position.Y + hipHeight + rootHalf,
+				desiredPosition.Z
+			)
+	end
+
+	-- Face toward the target.
+	return CFrame.lookAt(
+		desiredPosition,
+		Vector3.new(
+			targetRoot.Position.X,
+			desiredPosition.Y,
+			targetRoot.Position.Z
+		)
+	)
+end
+
 local function teleportToTarget(target)
 	if not target or target.Parent ~= Players then
 		return false, "Player left the server."
 	end
 
+	local myCharacter = LocalPlayer.Character
 	local myRoot = getCharacterRoot(LocalPlayer)
 	local targetRoot = getCharacterRoot(target)
 
-	if not myRoot then
+	if not myCharacter or not myRoot then
 		return false, "Your character is not ready."
 	end
 
@@ -209,24 +295,61 @@ local function teleportToTarget(target)
 		return false, target.Name .. " character is not ready."
 	end
 
-	-- Stay about 3 studs IN FRONT of the target
-	-- and face toward them.
-	local frontPosition =
-		targetRoot.Position
-		+ (targetRoot.CFrame.LookVector * 3)
+	local myHumanoid =
+		myCharacter:FindFirstChildOfClass("Humanoid")
 
-	local destination =
-		CFrame.lookAt(
-			frontPosition,
-			targetRoot.Position
-		)
+	if not myHumanoid or myHumanoid.Health <= 0 then
+		return false, "Your humanoid is not ready."
+	end
+
+	-- Re-apply the teleport over several rendered frames.
+	for _ = 1, STABILIZE_FRAMES do
+		if target.Parent ~= Players then
+			return false, "Player left the server."
+		end
+
+		myCharacter = LocalPlayer.Character
+		myRoot = getCharacterRoot(LocalPlayer)
+		targetRoot = getCharacterRoot(target)
+
+		if not myCharacter or not myRoot or not targetRoot then
+			return false, "Character changed during teleport."
+		end
+
+		myHumanoid =
+			myCharacter:FindFirstChildOfClass("Humanoid")
+
+		if not myHumanoid or myHumanoid.Health <= 0 then
+			return false, "Your humanoid is not ready."
+		end
+
+		local destination =
+			getSafeFrontDestination(
+				targetRoot,
+				myCharacter,
+				myHumanoid,
+				myRoot
+			)
+
+		pcall(function()
+			myRoot.AssemblyLinearVelocity = Vector3.zero
+			myRoot.AssemblyAngularVelocity = Vector3.zero
+			myCharacter:PivotTo(destination)
+		end)
+
+		game:GetService("RunService").RenderStepped:Wait()
+	end
 
 	pcall(function()
 		myRoot.AssemblyLinearVelocity = Vector3.zero
 		myRoot.AssemblyAngularVelocity = Vector3.zero
-	end)
 
-	myRoot.CFrame = destination
+		if myHumanoid.FloorMaterial ~= Enum.Material.Air then
+			myHumanoid:ChangeState(
+				Enum.HumanoidStateType.Running
+			)
+		end
+	end)
 
 	return true
 end
@@ -302,7 +425,7 @@ task.spawn(function()
 
 				if ok then
 					status.Text =
-						"LOOP -> "
+						"STABLE LOOP -> "
 						.. loopTarget.Name
 				else
 					status.Text =
