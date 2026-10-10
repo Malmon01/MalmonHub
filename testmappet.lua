@@ -113,6 +113,7 @@ local function stop()
     startBtn.BackgroundColor3 = Color3.fromRGB(30, 175, 90)
 end
 
+
 local function collect(info, id)
     local candy = info.candy
     local prompt = info.prompt
@@ -120,6 +121,68 @@ local function collect(info, id)
     if not candy.Parent or not prompt.Parent then
         return false
     end
+
+    local promptPosition
+
+    if prompt.Parent:IsA("Attachment") then
+        promptPosition = prompt.Parent.WorldPosition
+    elseif prompt.Parent:IsA("BasePart") then
+        promptPosition = prompt.Parent.Position
+    else
+        promptPosition = info.part.Position
+    end
+
+    -- วาร์ปเข้าใกล้จุดกด E
+    teleport(CFrame.new(
+        promptPosition + Vector3.new(0, 2, 0)
+    ))
+
+    task.wait(0.3)
+
+    if not running or id ~= runId then
+        return false
+    end
+
+    -- ตรวจสอบว่ากด E ได้
+    if not prompt.Enabled then
+        return false
+    end
+
+    local triggered = false
+
+    local connection = prompt.Triggered:Connect(function()
+        triggered = true
+    end)
+
+    -- เริ่มกด E ค้าง
+    prompt:InputHoldBegin()
+
+    -- ค้างตาม HoldDuration ของแคนดี้
+    local holdTime = math.max(prompt.HoldDuration, 0)
+    local elapsed = 0
+
+    while elapsed < holdTime + 0.15 do
+        if not running or id ~= runId then
+            prompt:InputHoldEnd()
+            connection:Disconnect()
+            return false
+        end
+
+        elapsed += task.wait(0.03)
+    end
+
+    -- ปล่อย E หลังค้างครบเวลา
+    prompt:InputHoldEnd()
+
+    -- รอให้ระบบเกมประมวลผล
+    task.wait(0.25)
+
+    connection:Disconnect()
+
+    return triggered
+        or not candy:IsDescendantOf(folder)
+end
+
 
     -- Teleport close to E prompt
     local promptPosition
