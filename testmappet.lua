@@ -1,9 +1,7 @@
 
---========================================
--- CANDY COLLECTOR V8
--- TWEEN SPEED: 1000 STUDS/SECOND
--- SINGLE LOCALSCRIPT
---========================================
+-- Candy Collector V7
+-- Tween Movement / Home / Start / Stop
+-- Roblox Studio LocalScript
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
@@ -11,30 +9,26 @@ local PPS = game:GetService("ProximityPromptService")
 
 local player = Players.LocalPlayer
 local folder = workspace:WaitForChild("HalloweenCandy")
-local playerGui = player:WaitForChild("PlayerGui")
+local pg = player:WaitForChild("PlayerGui")
 
-local character = player.Character or player.CharacterAdded:Wait()
-local root = character:WaitForChild("HumanoidRootPart")
+local char = player.Character or player.CharacterAdded:Wait()
+local root = char:WaitForChild("HumanoidRootPart")
 
 -- SETTINGS
-local MOVE_SPEED = 1000
+local MOVE_SPEED = 28
 local MAX_ATTEMPTS = 2
-local PROMPT_TIMEOUT = 0.8
-local COLLECT_TIMEOUT = 0.6
 local HOLD_EXTRA = 0.15
-local ARRIVAL_OFFSET = Vector3.new(0, 2, 0)
-local RETURN_DELAY = 0.05
+local ARRIVAL_DISTANCE = 3
+local COLLECT_WAIT = 1.2
 
--- SAVE HOME
+-- HOME CHECKPOINT
 local HOME = root.CFrame
 
 local running = false
-local generation = 0
+local runId = 0
 local currentTween = nil
 local visiblePrompts = {}
-
-local removedCount = 0
-local triggeredCount = 0
+local confirmed = 0
 
 PPS.PromptShown:Connect(function(prompt)
     visiblePrompts[prompt] = true
@@ -44,94 +38,66 @@ PPS.PromptHidden:Connect(function(prompt)
     visiblePrompts[prompt] = nil
 end)
 
---========================================
--- UI
---========================================
+-- REMOVE OLD UI
+local old = pg:FindFirstChild("CandyTweenV7")
+if old then old:Destroy() end
 
-local old = playerGui:FindFirstChild("CandyV8")
-
-if old then
-    old:Destroy()
-end
-
+-- CREATE UI
 local gui = Instance.new("ScreenGui")
-gui.Name = "CandyV8"
+gui.Name = "CandyTweenV7"
 gui.ResetOnSpawn = false
-gui.Parent = playerGui
+gui.Parent = pg
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(280, 230)
-frame.Position = UDim2.new(0.5, -140, 0.35, 0)
+frame.Size = UDim2.fromOffset(260, 205)
+frame.Position = UDim2.new(0.5, -130, 0.35, 0)
 frame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
 frame.Active = true
 frame.Draggable = true
 frame.Parent = gui
 
-local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0, 12)
-corner.Parent = frame
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
 
-local function createButton(text, y, color)
-    local button = Instance.new("TextButton")
+local function button(name, y, color)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -20, 0, 45)
+    b.Position = UDim2.fromOffset(10, y)
+    b.BackgroundColor3 = color
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 16
+    b.Text = name
+    b.Parent = frame
 
-    button.Size = UDim2.new(1, -20, 0, 45)
-    button.Position = UDim2.fromOffset(10, y)
-
-    button.BackgroundColor3 = color
-    button.TextColor3 = Color3.new(1, 1, 1)
-
-    button.Font = Enum.Font.GothamBold
-    button.TextSize = 16
-    button.Text = text
-
-    button.Parent = frame
-
-    Instance.new("UICorner", button).CornerRadius =
-        UDim.new(0, 9)
-
-    return button
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
+    return b
 end
 
-local homeBtn = createButton(
-    "HOME",
-    12,
-    Color3.fromRGB(45, 110, 220)
-)
-
-local startBtn = createButton(
-    "START COLLECT",
-    65,
-    Color3.fromRGB(30, 175, 90)
-)
+local homeBtn = button("HOME", 12, Color3.fromRGB(45, 110, 220))
+local startBtn = button("START COLLECT", 65, Color3.fromRGB(30, 175, 90))
 
 local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -20, 0, 95)
+status.Size = UDim2.new(1, -20, 0, 70)
 status.Position = UDim2.fromOffset(10, 125)
 status.BackgroundTransparency = 1
 status.TextColor3 = Color3.new(1, 1, 1)
-status.TextSize = 13
 status.TextWrapped = true
-status.Font = Enum.Font.Gotham
-status.Text = "READY | SPEED 1000"
+status.TextSize = 13
+status.Text = "READY | HOME SAVED"
 status.Parent = frame
 
-local function setStatus(text)
-    status.Text = text
-    print("[CANDY V8]", text)
+local function setStatus(msg)
+    status.Text = msg
+    print("[CANDY V7]", msg)
 end
-
---========================================
--- MOVEMENT
---========================================
 
 local function getRoot()
     local c = player.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
 
-    if not c then
-        return nil
-    end
-
-    return c:FindFirstChild("HumanoidRootPart")
+local function active(id)
+    return running and runId == id
 end
 
 local function cancelTween()
@@ -141,18 +107,12 @@ local function cancelTween()
     end
 end
 
-local function valid(id)
-    return generation == id
-end
-
+-- TWEEN MOVEMENT
 local function moveTo(position, id)
-    if not valid(id) then
-        return false
-    end
-
     local hrp = getRoot()
+    if not hrp then return false end
 
-    if not hrp then
+    if id and not active(id) then
         return false
     end
 
@@ -160,94 +120,76 @@ local function moveTo(position, id)
 
     local distance = (hrp.Position - position).Magnitude
 
-    if distance < 0.5 then
+    if distance < 0.3 then
         return true
     end
 
-    -- Speed = 1000 studs/second
-    local duration = math.max(
-        distance / MOVE_SPEED,
-        0.01
-    )
+    -- Duration based on travel distance
+    local duration = distance / MOVE_SPEED
 
     local direction = position - hrp.Position
-    local flat = Vector3.new(
-        direction.X,
-        0,
-        direction.Z
-    )
+    local facing = hrp.CFrame.LookVector
 
-    local targetCF
-
-    if flat.Magnitude > 0.01 then
-        targetCF = CFrame.lookAt(
-            position,
-            position + flat.Unit
-        )
-    else
-        targetCF = CFrame.new(position)
+    if direction.Magnitude > 0.1 then
+        local flat = Vector3.new(direction.X, 0, direction.Z)
+        if flat.Magnitude > 0.01 then
+            facing = flat.Unit
+        end
     end
+
+    local targetCF = CFrame.lookAt(
+        position,
+        position + facing
+    )
 
     local tween = TweenService:Create(
         hrp,
         TweenInfo.new(
             duration,
-            Enum.EasingStyle.Linear
+            Enum.EasingStyle.Linear,
+            Enum.EasingDirection.InOut
         ),
-        {
-            CFrame = targetCF
-        }
+        {CFrame = targetCF}
     )
 
     currentTween = tween
     tween:Play()
 
-    local result = tween.Completed:Wait()
+    local playbackState = tween.Completed:Wait()
 
     if currentTween == tween then
         currentTween = nil
     end
 
-    if not valid(id) then
+    if id and not active(id) then
         return false
     end
 
-    return result == Enum.PlaybackState.Completed
+    return playbackState == Enum.PlaybackState.Completed
 end
 
 local function returnHome(id)
-    setStatus("RETURNING HOME...")
+    setStatus("MOVING HOME...")
     return moveTo(HOME.Position, id)
 end
 
---========================================
--- FIND CANDIES
---========================================
-
+-- CANDIES FROM FOLDER
 local function getCandies()
-    local candies = {}
+    local list = {}
 
     for _, candy in ipairs(folder:GetChildren()) do
         if candy.Name:match("^Candy_")
             and candy:IsA("BasePart") then
-
-            table.insert(candies, candy)
+            table.insert(list, candy)
         end
     end
 
-    return candies
+    return list
 end
 
---========================================
--- FIND PROMPT
---========================================
-
-local function getPromptPosition(prompt)
+local function promptPosition(prompt)
     local parent = prompt.Parent
-
-    if not parent then
-        return nil
-    end
+    if not parent then return nil end
 
     if parent:IsA("Attachment") then
         return parent.WorldPosition
@@ -257,55 +199,38 @@ local function getPromptPosition(prompt)
         return parent.Position
     end
 
-    if parent:IsA("Model") then
-        return parent:GetPivot().Position
-    end
-
     return nil
 end
 
 local function findPrompt(candy)
-    -- Prefer a prompt inside this candy
     local own = candy:FindFirstChildWhichIsA(
-        "ProximityPrompt",
-        true
+        "ProximityPrompt", true
     )
 
     if own and own.Enabled then
         return own
     end
 
-    -- Otherwise find a visible nearby E prompt
-    local best = nil
+    local closest = nil
     local bestDistance = math.huge
 
     for prompt in pairs(visiblePrompts) do
-        if prompt.Parent
-            and prompt.Enabled
-            and prompt.KeyboardKeyCode == Enum.KeyCode.E then
-
-            local pos = getPromptPosition(prompt)
+        if prompt.Parent and prompt.Enabled then
+            local pos = promptPosition(prompt)
 
             if pos then
-                local distance =
-                    (pos - candy.Position).Magnitude
+                local distance = (pos - candy.Position).Magnitude
 
-                if distance < bestDistance
-                    and distance <= 5 then
-
-                    best = prompt
+                if distance < bestDistance and distance <= 5 then
                     bestDistance = distance
+                    closest = prompt
                 end
             end
         end
     end
 
-    return best
+    return closest
 end
-
---========================================
--- COLLECT CANDY
---========================================
 
 local function collectCandy(candy, id)
     if not candy:IsDescendantOf(folder) then
@@ -314,22 +239,26 @@ local function collectCandy(candy, id)
 
     setStatus("MOVING TO\n" .. candy.Name)
 
-    local target = candy.Position + ARRIVAL_OFFSET
+    local target = candy.Position + Vector3.new(
+        0, ARRIVAL_DISTANCE, 0
+    )
 
     if not moveTo(target, id) then
         return "cancelled"
     end
 
-    if not valid(id) or not running then
+    if not active(id) then
         return "cancelled"
     end
 
-    -- Find nearby E prompt
+    task.wait(0.3)
+
+    -- FIND E PROMPT
     local prompt = nil
-    local deadline = os.clock() + PROMPT_TIMEOUT
+    local deadline = os.clock() + 2.5
 
     while os.clock() < deadline do
-        if not valid(id) or not running then
+        if not active(id) then
             return "cancelled"
         end
 
@@ -339,39 +268,30 @@ local function collectCandy(candy, id)
             break
         end
 
-        task.wait(0.03)
+        task.wait(0.05)
     end
 
     if not prompt then
+        setStatus("NO E PROMPT\n" .. candy.Name)
         return "no_prompt"
     end
 
+    -- HOLD E
     local triggered = false
 
     local connection = prompt.Triggered:Connect(function()
         triggered = true
     end)
 
-    setStatus(
-        "HOLDING E\n"
-        .. candy.Name
-        .. "\n"
-        .. string.format("%.2f", prompt.HoldDuration)
-        .. " seconds"
-    )
+    setStatus("HOLDING E\n" .. candy.Name)
 
-    -- Start holding E interaction
-    local holdTime = math.max(
-        0,
-        prompt.HoldDuration
-    ) + HOLD_EXTRA
+    local duration = math.max(0, prompt.HoldDuration)
+    local holdStart = os.clock()
 
     prompt:InputHoldBegin()
 
-    local startTime = os.clock()
-
-    while os.clock() - startTime < holdTime do
-        if not valid(id) or not running then
+    while os.clock() - holdStart < duration + HOLD_EXTRA do
+        if not active(id) then
             prompt:InputHoldEnd()
             connection:Disconnect()
             return "cancelled"
@@ -380,14 +300,12 @@ local function collectCandy(candy, id)
         task.wait(0.03)
     end
 
-    -- Release E
     prompt:InputHoldEnd()
 
-    -- Verify whether candy was removed
-    local finishTime = os.clock() + COLLECT_TIMEOUT
+    local deadline2 = os.clock() + COLLECT_WAIT
 
-    while os.clock() < finishTime do
-        if not valid(id) or not running then
+    while os.clock() < deadline2 do
+        if not active(id) then
             connection:Disconnect()
             return "cancelled"
         end
@@ -397,7 +315,7 @@ local function collectCandy(candy, id)
             return "removed"
         end
 
-        task.wait(0.03)
+        task.wait(0.05)
     end
 
     connection:Disconnect()
@@ -409,37 +327,26 @@ local function collectCandy(candy, id)
     return "failed"
 end
 
---========================================
--- CONTROL
---========================================
-
 local function stop()
     running = false
-    generation += 1
-
+    runId += 1
     cancelTween()
 
     startBtn.Text = "START COLLECT"
-    startBtn.BackgroundColor3 =
-        Color3.fromRGB(30, 175, 90)
+    startBtn.BackgroundColor3 = Color3.fromRGB(30, 175, 90)
 end
 
+-- HOME BUTTON
 homeBtn.MouseButton1Click:Connect(function()
     stop()
 
-    local id = generation
-
     task.spawn(function()
-        if returnHome(id) then
-            setStatus("HOME REACHED")
-        end
+        returnHome()
+        setStatus("RETURNED HOME")
     end)
 end)
 
---========================================
--- AUTO COLLECT LOOP
---========================================
-
+-- START / STOP
 startBtn.MouseButton1Click:Connect(function()
     if running then
         stop()
@@ -448,122 +355,86 @@ startBtn.MouseButton1Click:Connect(function()
     end
 
     cancelTween()
-
     running = true
-    generation += 1
+    runId += 1
 
-    local id = generation
+    local id = runId
     local attempts = {}
 
-    removedCount = 0
-    triggeredCount = 0
+    confirmed = 0
 
     startBtn.Text = "STOP COLLECT"
-    startBtn.BackgroundColor3 =
-        Color3.fromRGB(215, 55, 65)
+    startBtn.BackgroundColor3 = Color3.fromRGB(210, 55, 65)
 
     task.spawn(function()
         local round = 0
 
-        while running and valid(id) do
+        while active(id) do
             round += 1
 
             local candies = getCandies()
-            local attempted = 0
+            local attemptedThisRound = 0
 
             if #candies == 0 then
-                setStatus("ALL CANDIES REMOVED!")
+                setStatus("ALL CANDY OBJECTS REMOVED")
                 break
             end
 
             for _, candy in ipairs(candies) do
-                if not running or not valid(id) then
+                if not active(id) then
                     break
                 end
 
-                local count = attempts[candy] or 0
-
-                if count < MAX_ATTEMPTS then
-                    attempts[candy] = count + 1
-                    attempted += 1
-
-                    setStatus(
-                        "ROUND " .. round
-                        .. "\nTARGET: " .. candy.Name
-                        .. "\nSPEED: 1000"
-                    )
+                if (attempts[candy] or 0) < MAX_ATTEMPTS then
+                    attempts[candy] = (attempts[candy] or 0) + 1
+                    attemptedThisRound += 1
 
                     local result = collectCandy(candy, id)
 
-                    if not running or not valid(id) then
+                    if not active(id) then
                         break
                     end
 
                     if result == "removed" then
-                        removedCount += 1
-
-                        setStatus(
-                            "CANDY REMOVED: " .. removedCount
-                        )
-
+                        confirmed += 1
+                        setStatus("CANDY REMOVED: " .. confirmed)
                     elseif result == "triggered" then
-                        triggeredCount += 1
-
-                        setStatus(
-                            "E TRIGGERED\n"
-                            .. "ITEM NOT CONFIRMED"
-                        )
-
-                    elseif result == "no_prompt" then
-                        setStatus(
-                            "NO E PROMPT\n"
-                            .. candy.Name
-                        )
-
+                        setStatus("E TRIGGERED | NOT CONFIRMED")
                     else
-                        setStatus(
-                            "FAILED: " .. result
-                        )
+                        setStatus("COLLECT: " .. result)
                     end
 
-                    -- Return HOME after each candy
+                    -- Move back to Home after each candy
                     if not returnHome(id) then
                         break
                     end
 
-                    task.wait(RETURN_DELAY)
+                    task.wait(0.25)
                 end
             end
 
-            if not running or not valid(id) then
+            if not active(id) then
                 break
             end
 
-            local remaining = getCandies()
+            if #getCandies() == 0 then
+                setStatus("FINISHED | REMOVED: " .. confirmed)
+                break
+            end
 
-            if #remaining == 0 then
+            if attemptedThisRound == 0 then
                 setStatus(
-                    "FINISHED\nREMOVED: "
-                    .. removedCount
+                    "TEST COMPLETE\n"
+                    .. "Removed: " .. confirmed
+                    .. " | Remaining: " .. #getCandies()
                 )
                 break
             end
 
-            if attempted == 0 then
-                setStatus(
-                    "TEST FINISHED\n"
-                    .. "Removed: " .. removedCount
-                    .. "\nRemaining: " .. #remaining
-                    .. "\nE Triggered: " .. triggeredCount
-                )
-                break
-            end
-
-            task.wait(0.1)
+            task.wait(0.4)
         end
 
-        if running and valid(id) then
-            returnHome(id)
+        if active(id) then
             stop()
         end
     end)
@@ -571,6 +442,5 @@ end)
 
 setStatus(
     "READY | HOME SAVED\n"
-    .. "SPEED: 1000 studs/s\n"
-    .. "CANDIES: " .. #getCandies()
+    .. "Candy: " .. #getCandies()
 )
