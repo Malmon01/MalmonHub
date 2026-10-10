@@ -1,215 +1,102 @@
 
--- Candy Collector V4
--- Teleport + Interaction Diagnostics
-
 local Players = game:GetService("Players")
 local PPS = game:GetService("ProximityPromptService")
 
 local player = Players.LocalPlayer
 local folder = workspace:WaitForChild("HalloweenCandy")
-local playerGui = player:WaitForChild("PlayerGui")
-
 local root = (player.Character or player.CharacterAdded:Wait())
     :WaitForChild("HumanoidRootPart")
 
 local HOME = root.CFrame
-local running = false
-local runId = 0
+local activePrompts = {}
 
-local old = playerGui:FindFirstChild("CandyV4")
-if old then old:Destroy() end
+PPS.PromptShown:Connect(function(prompt)
+    activePrompts[prompt] = true
+    print("[E FOUND]", prompt:GetFullName())
+    print("Hold:", prompt.HoldDuration)
+end)
 
-local gui = Instance.new("ScreenGui")
-gui.Name = "CandyV4"
-gui.ResetOnSpawn = false
-gui.Parent = playerGui
+PPS.PromptHidden:Connect(function(prompt)
+    activePrompts[prompt] = nil
+end)
 
-local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(270, 210)
-frame.Position = UDim2.new(0.5, -135, 0.35, 0)
-frame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
-frame.Active = true
-frame.Draggable = true
-frame.Parent = gui
-
-Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
-
-local function makeButton(text, y, color)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.new(1, -20, 0, 45)
-    b.Position = UDim2.fromOffset(10, y)
-    b.BackgroundColor3 = color
-    b.TextColor3 = Color3.new(1, 1, 1)
-    b.Text = text
-    b.Font = Enum.Font.GothamBold
-    b.TextSize = 16
-    b.Parent = frame
-    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
-    return b
-end
-
-local homeBtn = makeButton(
-    "HOME", 12, Color3.fromRGB(45, 110, 220)
-)
-
-local startBtn = makeButton(
-    "START COLLECT", 65, Color3.fromRGB(35, 175, 90)
-)
-
-local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -20, 0, 75)
-status.Position = UDim2.fromOffset(10, 120)
-status.BackgroundTransparency = 1
-status.TextColor3 = Color3.new(1, 1, 1)
-status.TextWrapped = true
-status.TextSize = 13
-status.Text = "Ready | Home Saved"
-status.Parent = frame
-
-local function teleport(cf)
-    local char = player.Character
-    if char then
-        char:PivotTo(cf)
+local function getPart(candy)
+    if candy:IsA("BasePart") then
+        return candy
+    elseif candy:IsA("Model") then
+        return candy.PrimaryPart
+            or candy:FindFirstChildWhichIsA("BasePart", true)
     end
 end
 
-local function getCandyPart(obj)
-    if obj:IsA("BasePart") then
-        return obj
-    end
+local candies = {}
 
-    if obj:IsA("Model") then
-        return obj.PrimaryPart
-            or obj:FindFirstChildWhichIsA("BasePart", true)
-    end
-
-    return nil
-end
-
-local function getCandies()
-    local list = {}
-
-    for _, obj in ipairs(folder:GetChildren()) do
-        if obj.Name:match("^Candy_") then
-            local part = getCandyPart(obj)
-
-            if part then
-                table.insert(list, {
-                    object = obj,
-                    part = part
-                })
-            end
+for _, candy in ipairs(folder:GetChildren()) do
+    if candy.Name:match("^Candy_") then
+        local part = getPart(candy)
+        if part then
+            table.insert(candies, {
+                candy = candy,
+                part = part
+            })
         end
     end
-
-    return list
 end
 
-local function stop()
-    running = false
-    runId += 1
-    startBtn.Text = "START COLLECT"
-    startBtn.BackgroundColor3 = Color3.fromRGB(35, 175, 90)
-end
+print("Candies found:", #candies)
 
-local function inspectCandy(info)
-    local candy = info.object
+for i, info in ipairs(candies) do
+    local character = player.Character
+    if not character then break end
 
-    local prompt = candy:FindFirstChildWhichIsA(
-        "ProximityPrompt", true
+    character:PivotTo(
+        CFrame.new(info.part.Position + Vector3.new(0, 2, 0))
     )
 
-    if prompt then
-        print("Candy:", candy.Name)
-        print("Prompt:", prompt:GetFullName())
-        print("HoldDuration:", prompt.HoldDuration)
-        print("Enabled:", prompt.Enabled)
-        return prompt
+    print("Teleport:", i, info.candy.Name)
+
+    task.wait(1)
+
+    local found = false
+
+    for prompt in pairs(activePrompts) do
+        if prompt.Parent and prompt.Enabled then
+            found = true
+
+            print("Trying E:", prompt:GetFullName())
+
+            local triggered = false
+            local connection = prompt.Triggered:Connect(function()
+                triggered = true
+            end)
+
+            prompt:InputHoldBegin()
+
+            local duration = prompt.HoldDuration
+            local start = os.clock()
+
+            while os.clock() - start < duration + 0.2 do
+                task.wait(0.03)
+            end
+
+            prompt:InputHoldEnd()
+            task.wait(0.3)
+
+            print("Triggered:", triggered)
+            connection:Disconnect()
+            break
+        end
     end
 
-    print("Candy:", candy.Name)
-    print("No ProximityPrompt inside candy")
-    return nil
+    if not found then
+        warn("No visible ProximityPrompt near:", info.candy.Name)
+    end
+
+    task.wait(0.3)
 end
 
-homeBtn.MouseButton1Click:Connect(function()
-    stop()
-    teleport(HOME)
-    status.Text = "Returned Home"
-end)
+if player.Character then
+    player.Character:PivotTo(HOME)
+end
 
-startBtn.MouseButton1Click:Connect(function()
-    if running then
-        stop()
-        status.Text = "Stopped"
-        return
-    end
-
-    running = true
-    runId += 1
-    local id = runId
-
-    startBtn.Text = "STOP COLLECT"
-    startBtn.BackgroundColor3 = Color3.fromRGB(210, 55, 65)
-
-    task.spawn(function()
-        local candies = getCandies()
-
-        status.Text = "Found candies: " .. #candies
-        print("Found candies:", #candies)
-
-        if #candies == 0 then
-            status.Text = "No Candy Parts found"
-        end
-
-        for i, info in ipairs(candies) do
-            if not running or id ~= runId then
-                break
-            end
-
-            if info.object:IsDescendantOf(folder) then
-                local part = info.part
-
-                status.Text = "Teleporting: "
-                    .. i .. "/" .. #candies
-
-                teleport(
-                    part.CFrame * CFrame.new(0, 3, 0)
-                )
-
-                task.wait(0.6)
-
-                local prompt = inspectCandy(info)
-
-                if prompt and prompt.Enabled then
-                    status.Text = "Holding E: " .. info.object.Name
-
-                    local holdTime = prompt.HoldDuration
-                    prompt:InputHoldBegin()
-
-                    local elapsed = 0
-
-                    while elapsed < holdTime + 0.2 do
-                        if not running or id ~= runId then
-                            break
-                        end
-                        elapsed += task.wait(0.05)
-                    end
-
-                    prompt:InputHoldEnd()
-                else
-                    status.Text = "No E prompt: "
-                        .. info.object.Name
-                end
-
-                task.wait(0.4)
-            end
-        end
-
-        if running and id == runId then
-            teleport(HOME)
-            status.Text = "Test complete | Returned Home"
-            stop()
-        end
-    end)
-end)
+print("Candy test completed")
