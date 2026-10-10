@@ -15,7 +15,7 @@ local char = player.Character or player.CharacterAdded:Wait()
 local root = char:WaitForChild("HumanoidRootPart")
 
 -- SETTINGS
-local MOVE_SPEED = 28
+local MOVE_SPEED = 10000
 local MAX_ATTEMPTS = 2
 local HOLD_EXTRA = 0.15
 local ARRIVAL_DISTANCE = 3
