@@ -1,45 +1,33 @@
 
--- Candy Collector V3 | Test Version
--- Single LocalScript
+-- Candy Collector V4
+-- Teleport + Interaction Diagnostics
 
 local Players = game:GetService("Players")
 local PPS = game:GetService("ProximityPromptService")
 
 local player = Players.LocalPlayer
 local folder = workspace:WaitForChild("HalloweenCandy")
+local playerGui = player:WaitForChild("PlayerGui")
 
-local char = player.Character or player.CharacterAdded:Wait()
-local root = char:WaitForChild("HumanoidRootPart")
+local root = (player.Character or player.CharacterAdded:Wait())
+    :WaitForChild("HumanoidRootPart")
+
 local HOME = root.CFrame
-
 local running = false
-local token = 0
-local successes = 0
-local shownPrompts = {}
+local runId = 0
 
--- Detect actual visible prompts
-PPS.PromptShown:Connect(function(prompt)
-    shownPrompts[prompt] = true
-end)
-
-PPS.PromptHidden:Connect(function(prompt)
-    shownPrompts[prompt] = nil
-end)
-
--- UI
-local pg = player:WaitForChild("PlayerGui")
-local old = pg:FindFirstChild("CandyCollectorV3")
+local old = playerGui:FindFirstChild("CandyV4")
 if old then old:Destroy() end
 
 local gui = Instance.new("ScreenGui")
-gui.Name = "CandyCollectorV3"
+gui.Name = "CandyV4"
 gui.ResetOnSpawn = false
-gui.Parent = pg
+gui.Parent = playerGui
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(250, 205)
-frame.Position = UDim2.new(0.5, -125, 0.4, 0)
-frame.BackgroundColor3 = Color3.fromRGB(28, 28, 38)
+frame.Size = UDim2.fromOffset(270, 210)
+frame.Position = UDim2.new(0.5, -135, 0.35, 0)
+frame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
 frame.Active = true
 frame.Draggable = true
 frame.Parent = gui
@@ -61,16 +49,16 @@ local function makeButton(text, y, color)
 end
 
 local homeBtn = makeButton(
-    "HOME", 12, Color3.fromRGB(50, 110, 220)
+    "HOME", 12, Color3.fromRGB(45, 110, 220)
 )
 
 local startBtn = makeButton(
-    "START COLLECT", 67, Color3.fromRGB(35, 170, 90)
+    "START COLLECT", 65, Color3.fromRGB(35, 175, 90)
 )
 
 local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -20, 0, 65)
-status.Position = UDim2.fromOffset(10, 125)
+status.Size = UDim2.new(1, -20, 0, 75)
+status.Position = UDim2.fromOffset(10, 120)
 status.BackgroundTransparency = 1
 status.TextColor3 = Color3.new(1, 1, 1)
 status.TextWrapped = true
@@ -78,27 +66,21 @@ status.TextSize = 13
 status.Text = "Ready | Home Saved"
 status.Parent = frame
 
-local function getRoot()
-    local c = player.Character
-    return c and c:FindFirstChild("HumanoidRootPart")
-end
-
 local function teleport(cf)
-    local r = getRoot()
-    if r then
-        r.CFrame = cf
-        r.AssemblyLinearVelocity = Vector3.zero
-        r.AssemblyAngularVelocity = Vector3.zero
+    local char = player.Character
+    if char then
+        char:PivotTo(cf)
     end
 end
 
-local function getPromptPosition(prompt)
-    local parent = prompt.Parent
+local function getCandyPart(obj)
+    if obj:IsA("BasePart") then
+        return obj
+    end
 
-    if parent:IsA("Attachment") then
-        return parent.WorldPosition
-    elseif parent:IsA("BasePart") then
-        return parent.Position
+    if obj:IsA("Model") then
+        return obj.PrimaryPart
+            or obj:FindFirstChildWhichIsA("BasePart", true)
     end
 
     return nil
@@ -107,9 +89,16 @@ end
 local function getCandies()
     local list = {}
 
-    for _, obj in ipairs(folder:GetDescendants()) do
-        if obj:IsA("ProximityPrompt") and obj.Enabled then
-            table.insert(list, obj)
+    for _, obj in ipairs(folder:GetChildren()) do
+        if obj.Name:match("^Candy_") then
+            local part = getCandyPart(obj)
+
+            if part then
+                table.insert(list, {
+                    object = obj,
+                    part = part
+                })
+            end
         end
     end
 
@@ -118,92 +107,29 @@ end
 
 local function stop()
     running = false
-    token += 1
+    runId += 1
     startBtn.Text = "START COLLECT"
-    startBtn.BackgroundColor3 = Color3.fromRGB(35, 170, 90)
+    startBtn.BackgroundColor3 = Color3.fromRGB(35, 175, 90)
 end
 
-local function attemptCollect(prompt, id)
-    if not prompt:IsDescendantOf(folder) then
-        return false
-    end
+local function inspectCandy(info)
+    local candy = info.object
 
-    local pos = getPromptPosition(prompt)
-    if not pos then
-        status.Text = "Invalid prompt position"
-        return false
-    end
-
-    -- Move within prompt range
-    local distance = math.min(
-        2,
-        math.max(0.5, prompt.MaxActivationDistance * 0.5)
+    local prompt = candy:FindFirstChildWhichIsA(
+        "ProximityPrompt", true
     )
 
-    teleport(CFrame.new(
-        pos + Vector3.new(0, 0, distance),
-        pos
-    ))
-
-    status.Text = "Waiting for E prompt..."
-
-    -- Wait until prompt is visible
-    local deadline = os.clock() + 3
-
-    while not shownPrompts[prompt] do
-        if not running or id ~= token then
-            return false
-        end
-
-        if os.clock() >= deadline then
-            status.Text = "E prompt not visible"
-            return false
-        end
-
-        task.wait(0.05)
+    if prompt then
+        print("Candy:", candy.Name)
+        print("Prompt:", prompt:GetFullName())
+        print("HoldDuration:", prompt.HoldDuration)
+        print("Enabled:", prompt.Enabled)
+        return prompt
     end
 
-    if not running or id ~= token then
-        return false
-    end
-
-    local triggered = false
-    local conn = prompt.Triggered:Connect(function()
-        triggered = true
-    end)
-
-    status.Text = "Holding E..."
-
-    -- Begin hold
-    prompt:InputHoldBegin()
-
-    local elapsed = 0
-    local holdTime = prompt.HoldDuration + 0.2
-
-    while elapsed < holdTime do
-        if not running or id ~= token then
-            prompt:InputHoldEnd()
-            conn:Disconnect()
-            return false
-        end
-
-        if triggered then break end
-        elapsed += task.wait(0.03)
-    end
-
-    -- Release after hold
-    prompt:InputHoldEnd()
-
-    local waitUntil = os.clock() + 1
-
-    while not triggered and os.clock() < waitUntil do
-        if not running or id ~= token then break end
-        task.wait(0.05)
-    end
-
-    conn:Disconnect()
-
-    return triggered
+    print("Candy:", candy.Name)
+    print("No ProximityPrompt inside candy")
+    return nil
 end
 
 homeBtn.MouseButton1Click:Connect(function()
@@ -220,67 +146,69 @@ startBtn.MouseButton1Click:Connect(function()
     end
 
     running = true
-    token += 1
-    local id = token
+    runId += 1
+    local id = runId
 
     startBtn.Text = "STOP COLLECT"
-    startBtn.BackgroundColor3 = Color3.fromRGB(215, 55, 65)
+    startBtn.BackgroundColor3 = Color3.fromRGB(210, 55, 65)
 
     task.spawn(function()
-        local failed = {}
-        local round = 0
+        local candies = getCandies()
 
-        while running and id == token do
-            round += 1
-            local prompts = getCandies()
-            local attempted = 0
+        status.Text = "Found candies: " .. #candies
+        print("Found candies:", #candies)
 
-            if #prompts == 0 then
-                status.Text = "No prompts remaining"
+        if #candies == 0 then
+            status.Text = "No Candy Parts found"
+        end
+
+        for i, info in ipairs(candies) do
+            if not running or id ~= runId then
                 break
             end
 
-            for _, prompt in ipairs(prompts) do
-                if not running or id ~= token then
-                    break
-                end
+            if info.object:IsDescendantOf(folder) then
+                local part = info.part
 
-                if not failed[prompt] then
-                    attempted += 1
+                status.Text = "Teleporting: "
+                    .. i .. "/" .. #candies
 
-                    local success = attemptCollect(prompt, id)
+                teleport(
+                    part.CFrame * CFrame.new(0, 3, 0)
+                )
 
-                    if success then
-                        successes += 1
-                        status.Text = "E triggered: " .. successes
-                    else
-                        failed[prompt] = true
+                task.wait(0.6)
+
+                local prompt = inspectCandy(info)
+
+                if prompt and prompt.Enabled then
+                    status.Text = "Holding E: " .. info.object.Name
+
+                    local holdTime = prompt.HoldDuration
+                    prompt:InputHoldBegin()
+
+                    local elapsed = 0
+
+                    while elapsed < holdTime + 0.2 do
+                        if not running or id ~= runId then
+                            break
+                        end
+                        elapsed += task.wait(0.05)
                     end
 
-                    task.wait(0.15)
+                    prompt:InputHoldEnd()
+                else
+                    status.Text = "No E prompt: "
+                        .. info.object.Name
                 end
-            end
 
-            if not running or id ~= token then
-                break
-            end
-
-            teleport(HOME)
-            task.wait(0.5)
-
-            if #getCandies() == 0 then
-                status.Text = "Finished | E triggered: " .. successes
-                break
-            end
-
-            if attempted == 0 then
-                status.Text = "Test finished | E triggered: "
-                    .. successes .. " | Some prompts remain"
-                break
+                task.wait(0.4)
             end
         end
 
-        if id == token then
+        if running and id == runId then
+            teleport(HOME)
+            status.Text = "Test complete | Returned Home"
             stop()
         end
     end)
