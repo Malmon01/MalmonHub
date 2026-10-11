@@ -1,10 +1,13 @@
 
 --========================================
--- SMART CANDY COLLECTOR V15
--- FAST SCAN: 0.20 SECONDS
--- HOLD E -> WAIT 7s -> HOME
--- PRIORITY FARMING
--- SINGLE LOCALSCRIPT
+-- SMART CANDY COLLECTOR V16
+-- PRIORITY FIX + NEVER AUTO STOP
+--
+-- SCAN: 0.20s
+-- WAIT AFTER E: 7s
+--
+-- UNKNOWN > LEGENDARY > EPIC
+-- > RARE > UNCOMMON > COMMON
 --========================================
 
 local Players = game:GetService("Players")
@@ -14,31 +17,29 @@ local player = Players.LocalPlayer
 local folder = workspace:WaitForChild("HalloweenCandy")
 local pg = player:WaitForChild("PlayerGui")
 
-local character = player.Character
-    or player.CharacterAdded:Wait()
-
-character:WaitForChild("HumanoidRootPart")
+local char = player.Character or player.CharacterAdded:Wait()
+char:WaitForChild("HumanoidRootPart")
 
 -- SETTINGS
 local SCAN_WAIT = 0.20
 local WAIT_AFTER_E = 7
-local PROMPT_TIMEOUT = 3
-local HOLD_EXTRA = 0.2
-local HOME_PAUSE = 0.4
-local ROUND_PAUSE = 1
-local E_RETRIES = 2
+local PROMPT_TIMEOUT = 2
+local HOLD_EXTRA = 0.20
+local HOME_PAUSE = 0.35
+local RETRY_DELAY = 5
 local ARRIVAL_HEIGHT = 2
 
--- PRIORITY
+-- PRIORITY: BIGGEST FIRST
 local PRIORITY = {
-    Unknown = 5,
-    Legendary = 4,
-    Epic = 3,
-    Rare = 2,
+    Unknown = 6,
+    Legendary = 5,
+    Epic = 4,
+    Rare = 3,
+    Uncommon = 2,
     Common = 1
 }
 
-local HOME = character:GetPivot()
+local HOME = char:GetPivot()
 
 local running = false
 local runId = 0
@@ -47,10 +48,10 @@ local currentPrompt = nil
 local visiblePrompts = {}
 local rarityMap = {}
 local scanned = {}
-local attempts = {}
+local retryAt = {}
 
-local round = 0
 local collected = 0
+local attempted = 0
 
 --========================================
 -- PROMPT TRACKING
@@ -68,11 +69,13 @@ end)
 -- UI
 --========================================
 
-local old = pg:FindFirstChild("CandyV15")
-if old then old:Destroy() end
+local old = pg:FindFirstChild("CandyV16")
+if old then
+    old:Destroy()
+end
 
 local gui = Instance.new("ScreenGui")
-gui.Name = "CandyV15"
+gui.Name = "CandyV16"
 gui.ResetOnSpawn = false
 gui.Parent = pg
 
@@ -87,7 +90,7 @@ frame.Parent = gui
 Instance.new("UICorner", frame).CornerRadius =
     UDim.new(0, 12)
 
-local function button(text, y, color)
+local function makeButton(text, y, color)
     local b = Instance.new("TextButton")
     b.Size = UDim2.new(1, -20, 0, 48)
     b.Position = UDim2.fromOffset(10, y)
@@ -104,11 +107,11 @@ local function button(text, y, color)
     return b
 end
 
-local homeBtn = button(
+local homeBtn = makeButton(
     "HOME", 12, Color3.fromRGB(45, 110, 220)
 )
 
-local startBtn = button(
+local startBtn = makeButton(
     "START COLLECT", 72, Color3.fromRGB(30, 175, 90)
 )
 
@@ -120,12 +123,12 @@ status.TextColor3 = Color3.new(1, 1, 1)
 status.Font = Enum.Font.Gotham
 status.TextSize = 13
 status.TextWrapped = true
-status.Text = "V15 READY"
+status.Text = "V16 READY"
 status.Parent = frame
 
 local function setStatus(message)
     status.Text = message
-    print("[CANDY V15]", message)
+    print("[CANDY V16]", message)
 end
 
 --========================================
@@ -133,12 +136,12 @@ end
 --========================================
 
 local function teleport(cf)
-    local char = player.Character
-    if not char then return false end
+    local c = player.Character
+    if not c then return false end
 
-    char:PivotTo(cf)
+    c:PivotTo(cf)
 
-    local root = char:FindFirstChild("HumanoidRootPart")
+    local root = c:FindFirstChild("HumanoidRootPart")
 
     if root then
         root.AssemblyLinearVelocity = Vector3.zero
@@ -167,7 +170,7 @@ local function waitActive(seconds, id)
 end
 
 --========================================
--- FIND CANDIES
+-- CANDY OBJECTS
 --========================================
 
 local function getPart(candy)
@@ -186,21 +189,20 @@ local function getPart(candy)
 end
 
 local function getCandies()
-    local result = {}
+    local list = {}
 
     for _, candy in ipairs(folder:GetChildren()) do
         if candy.Name:match("^Candy_")
             and getPart(candy) then
-
-            table.insert(result, candy)
+            table.insert(list, candy)
         end
     end
 
-    return result
+    return list
 end
 
 --========================================
--- RARITY DETECTION
+-- RARITY READER
 --========================================
 
 local function readRarity(value)
@@ -208,13 +210,21 @@ local function readRarity(value)
 
     local s = string.lower(tostring(value))
 
-    if s:find("legendary", 1, true) then
+    local function has(word)
+        return s:find(
+            "%f[%a]" .. word .. "%f[%A]"
+        ) ~= nil
+    end
+
+    if has("legendary") then
         return "Legendary"
-    elseif s:find("epic", 1, true) then
+    elseif has("epic") then
         return "Epic"
-    elseif s:find("rare", 1, true) then
+    elseif has("rare") then
         return "Rare"
-    elseif s:find("common", 1, true) then
+    elseif has("uncommon") then
+        return "Uncommon"
+    elseif has("common") then
         return "Common"
     end
 
@@ -230,7 +240,6 @@ local function readObjectRarity(candy)
 
     for _, obj in ipairs(objects) do
 
-        -- Attributes
         for key, value in pairs(obj:GetAttributes()) do
             local rarity = readRarity(value)
 
@@ -242,13 +251,11 @@ local function readObjectRarity(candy)
             end
         end
 
-        -- StringValue
         if obj:IsA("StringValue") then
             local rarity = readRarity(obj.Value)
             if rarity then return rarity end
         end
 
-        -- ProximityPrompt
         if obj:IsA("ProximityPrompt") then
             local rarity = readRarity(
                 obj.ObjectText .. " " .. obj.ActionText
@@ -257,12 +264,10 @@ local function readObjectRarity(candy)
             if rarity then return rarity end
         end
 
-        -- TextLabels attached to candy
         if obj:IsA("TextLabel")
             or obj:IsA("TextButton") then
 
             local rarity = readRarity(obj.Text)
-
             if rarity then return rarity end
         end
     end
@@ -271,25 +276,29 @@ local function readObjectRarity(candy)
 end
 
 --========================================
--- FIND E PROMPT
+-- PROMPT POSITION
 --========================================
 
-local function promptPosition(prompt)
-    local parent = prompt.Parent
+local function objectPosition(obj)
+    if not obj then return nil end
 
-    if not parent then return nil end
-
-    if parent:IsA("Attachment") then
-        return parent.WorldPosition
-    elseif parent:IsA("BasePart") then
-        return parent.Position
-    elseif parent:IsA("Model") then
-        return parent:GetPivot().Position
+    if obj:IsA("Attachment") then
+        return obj.WorldPosition
+    elseif obj:IsA("BasePart") then
+        return obj.Position
+    elseif obj:IsA("Model") then
+        return obj:GetPivot().Position
     end
 
     return nil
 end
 
+local function promptPosition(prompt)
+    return objectPosition(prompt.Parent)
+end
+
+-- Search nearby prompts, not only
+-- prompts parented under the candy.
 local function findPrompt(candy)
     local own = candy:FindFirstChildWhichIsA(
         "ProximityPrompt", true
@@ -302,27 +311,55 @@ local function findPrompt(candy)
     local part = getPart(candy)
     if not part then return nil end
 
+    local root = player.Character
+        and player.Character:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    if not root then return nil end
+
     local best = nil
     local nearest = math.huge
 
+    local function consider(prompt)
+        if not prompt.Enabled then return end
+
+        if prompt.KeyboardKeyCode ~= Enum.KeyCode.E then
+            return
+        end
+
+        local pos = promptPosition(prompt)
+        if not pos then return end
+
+        local candyDistance =
+            (pos - part.Position).Magnitude
+
+        local playerDistance =
+            (pos - root.Position).Magnitude
+
+        if candyDistance <= 8
+            and playerDistance <=
+                prompt.MaxActivationDistance + 2
+            and candyDistance < nearest then
+
+            nearest = candyDistance
+            best = prompt
+        end
+    end
+
+    -- First check prompts currently shown
     for prompt in pairs(visiblePrompts) do
-        if prompt.Parent
-            and prompt.Enabled
-            and prompt.KeyboardKeyCode == Enum.KeyCode.E then
+        if prompt.Parent then
+            consider(prompt)
+        end
+    end
 
-            local pos = promptPosition(prompt)
+    if best then return best end
 
-            if pos then
-                local distance =
-                    (pos - part.Position).Magnitude
-
-                if distance <= 6
-                    and distance < nearest then
-
-                    best = prompt
-                    nearest = distance
-                end
-            end
+    -- Fallback: search the actual workspace
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") then
+            consider(obj)
         end
     end
 
@@ -330,7 +367,7 @@ local function findPrompt(candy)
 end
 
 --========================================
--- READ NEARBY PICKUP GUI
+-- READ VISIBLE CANDY UI
 --========================================
 
 local function readNearbyGUI(candy)
@@ -344,12 +381,8 @@ local function readNearbyGUI(candy)
     local screenPos, onScreen =
         camera:WorldToViewportPoint(part.Position)
 
-    if not onScreen then
-        return nil
-    end
-
-    local nearest = math.huge
     local result = nil
+    local nearest = math.huge
 
     for _, obj in ipairs(pg:GetDescendants()) do
         if (obj:IsA("TextLabel")
@@ -360,21 +393,44 @@ local function readNearbyGUI(candy)
             local rarity = readRarity(obj.Text)
 
             if rarity then
-                local center =
-                    obj.AbsolutePosition
-                    + obj.AbsoluteSize / 2
+                local matched = false
+                local distance = math.huge
 
-                local distance = (
-                    center - Vector2.new(
-                        screenPos.X, screenPos.Y
+                local billboard =
+                    obj:FindFirstAncestorWhichIsA(
+                        "BillboardGui"
                     )
-                ).Magnitude
 
-                if distance < 160
-                    and distance < nearest then
+                if billboard then
+                    local anchor = billboard.Adornee
+                        or billboard.Parent
 
-                    result = rarity
+                    local pos = objectPosition(anchor)
+
+                    if pos then
+                        distance =
+                            (pos - part.Position).Magnitude
+
+                        matched = distance <= 8
+                    end
+                elseif onScreen then
+                    local center =
+                        obj.AbsolutePosition
+                        + obj.AbsoluteSize / 2
+
+                    distance = (
+                        center - Vector2.new(
+                            screenPos.X,
+                            screenPos.Y
+                        )
+                    ).Magnitude
+
+                    matched = distance <= 180
+                end
+
+                if matched and distance < nearest then
                     nearest = distance
+                    result = rarity
                 end
             end
         end
@@ -404,12 +460,12 @@ local function updateRarity(candy, prompt)
 end
 
 --========================================
--- FAST SCAN 0.20s
+-- FAST SCANNING
 --========================================
 
 local function scanNewCandies(id)
     local candies = getCandies()
-    local count = #candies
+    local moved = false
 
     for i, candy in ipairs(candies) do
         if not active(id) then
@@ -423,10 +479,12 @@ local function scanNewCandies(id)
                 local rarity = readObjectRarity(candy)
 
                 if not rarity then
+                    moved = true
+
                     setStatus(
-                        "FAST SCANNING"
-                        .. "\n" .. i .. "/" .. count
-                        .. "\nSCAN WAIT: 0.20s"
+                        "SCANNING " .. i
+                        .. "/" .. #candies
+                        .. "\nWAIT: 0.20s"
                     )
 
                     teleport(CFrame.new(
@@ -446,7 +504,7 @@ local function scanNewCandies(id)
                 scanned[candy] = true
 
                 print(
-                    "[V15 SCAN]",
+                    "[V16 RARITY]",
                     candy.Name,
                     rarityMap[candy]
                 )
@@ -454,16 +512,16 @@ local function scanNewCandies(id)
         end
     end
 
-    if not active(id) then
-        return false
+    if moved then
+        teleport(HOME)
+        return waitActive(0.15, id)
     end
 
-    teleport(HOME)
-    return waitActive(0.1, id)
+    return active(id)
 end
 
 --========================================
--- SORT BY RARITY
+-- PRIORITY SORT
 --========================================
 
 local function getSortedCandies()
@@ -473,13 +531,16 @@ local function getSortedCandies()
         local ra = rarityMap[a] or "Unknown"
         local rb = rarityMap[b] or "Unknown"
 
-        local pa = PRIORITY[ra] or 5
-        local pb = PRIORITY[rb] or 5
+        local pa = PRIORITY[ra] or 6
+        local pb = PRIORITY[rb] or 6
 
+        -- ALWAYS PRIORITIZE RARITY
         if pa ~= pb then
             return pa > pb
         end
 
+        -- Distance matters ONLY
+        -- for candies of equal priority
         local partA = getPart(a)
         local partB = getPart(b)
 
@@ -501,34 +562,101 @@ local function getSortedCandies()
     return candies
 end
 
+local function findHigherPriority(candy)
+    local rarity = rarityMap[candy] or "Unknown"
+    local currentPriority = PRIORITY[rarity] or 6
+
+    for _, other in ipairs(getSortedCandies()) do
+        if other ~= candy
+            and (retryAt[other] or 0) <= os.clock() then
+
+            local otherRarity =
+                rarityMap[other] or "Unknown"
+
+            local otherPriority =
+                PRIORITY[otherRarity] or 6
+
+            if otherPriority > currentPriority then
+                return other
+            end
+        end
+    end
+
+    return nil
+end
+
 --========================================
--- HOLD E
+-- COLLECT CANDY
 --========================================
 
-local function holdCandyE(candy, id)
+local function collectCandy(candy, id)
+    local part = getPart(candy)
+
+    if not part then
+        return "invalid"
+    end
+
+    if not candy:IsDescendantOf(folder) then
+        return "removed"
+    end
+
+    local rarity = rarityMap[candy] or "Unknown"
+
+    setStatus(
+        "TARGET: " .. candy.Name
+        .. "\nRARITY: " .. rarity
+        .. "\nTELEPORTING..."
+    )
+
+    teleport(CFrame.new(
+        part.Position
+        + Vector3.new(0, ARRIVAL_HEIGHT, 0)
+    ))
+
+    if not waitActive(0.25, id) then
+        return "cancelled"
+    end
+
     local prompt = nil
     local deadline = os.clock() + PROMPT_TIMEOUT
 
     while os.clock() < deadline do
         if not active(id) then
-            return false, "cancelled"
+            return "cancelled"
         end
 
         prompt = findPrompt(candy)
 
         if prompt then break end
-        task.wait(0.03)
+
+        task.wait(0.05)
+    end
+
+    -- Update rarity at actual location
+    rarity = updateRarity(candy, prompt)
+
+    -- If this was Unknown but is now
+    -- known to be lower rarity, choose
+    -- another higher-priority target.
+    local higher = findHigherPriority(candy)
+
+    if higher then
+        setStatus(
+            "FOUND: " .. rarity
+            .. "\nSWITCHING TO HIGHER PRIORITY"
+        )
+
+        return "switch_target"
     end
 
     if not prompt then
-        return false, "no_prompt"
+        return "no_prompt"
     end
 
-    local rarity = updateRarity(candy, prompt)
-
+    -- HOLD E USING PROXIMITY PROMPT
     local triggered = false
 
-    local connection = prompt.Triggered:Connect(function()
+    local conn = prompt.Triggered:Connect(function()
         triggered = true
     end)
 
@@ -540,118 +668,49 @@ local function holdCandyE(candy, id)
     setStatus(
         "HOLDING E"
         .. "\nRARITY: " .. rarity
-        .. "\nDURATION: "
-        .. string.format("%.2f", holdTime)
+        .. "\n" ..
+        string.format("%.2f", holdTime) .. "s"
     )
 
     prompt:InputHoldBegin()
 
-    local completed = waitActive(holdTime, id)
+    local held = waitActive(holdTime, id)
 
     prompt:InputHoldEnd()
-    currentPrompt = nil
 
-    if not completed then
-        connection:Disconnect()
-        return false, "cancelled"
+    if currentPrompt == prompt then
+        currentPrompt = nil
     end
 
-    local deadline2 = os.clock() + 0.6
+    if not held then
+        conn:Disconnect()
+        return "cancelled"
+    end
 
-    while not triggered
-        and candy:IsDescendantOf(folder)
-        and os.clock() < deadline2 do
+    local confirmDeadline = os.clock() + 0.6
 
+    while os.clock() < confirmDeadline do
         if not active(id) then
-            connection:Disconnect()
-            return false, "cancelled"
+            conn:Disconnect()
+            return "cancelled"
+        end
+
+        if triggered
+            or not candy:IsDescendantOf(folder) then
+            break
         end
 
         task.wait(0.03)
     end
 
-    connection:Disconnect()
+    conn:Disconnect()
 
-    if triggered then
-        return true, "triggered"
+    if not triggered
+        and candy:IsDescendantOf(folder) then
+        return "unconfirmed"
     end
 
-    if not candy:IsDescendantOf(folder) then
-        return true, "removed"
-    end
-
-    return false, "e_not_triggered"
-end
-
---========================================
--- COLLECT CANDY
---========================================
-
-local function collectCandy(candy, id)
-    local part = getPart(candy)
-
-    if not part then
-        return false, "invalid"
-    end
-
-    if not candy:IsDescendantOf(folder) then
-        return true, "already_removed"
-    end
-
-    local rarity = rarityMap[candy] or "Unknown"
-
-    setStatus(
-        "TELEPORT TO CANDY"
-        .. "\nRARITY: " .. rarity
-    )
-
-    teleport(CFrame.new(
-        part.Position
-        + Vector3.new(0, ARRIVAL_HEIGHT, 0)
-    ))
-
-    if not waitActive(0.3, id) then
-        return false, "cancelled"
-    end
-
-    -- IMPORTANT:
-    -- No reprioritize skip.
-    -- Always attempt E on selected candy.
-
-    local success = false
-    local result = "not_attempted"
-
-    for attempt = 1, E_RETRIES do
-        if not active(id) then
-            return false, "cancelled"
-        end
-
-        success, result = holdCandyE(candy, id)
-
-        if success then
-            break
-        end
-
-        if attempt < E_RETRIES then
-            setStatus(
-                "RETRY E"
-                .. "\n" .. attempt .. "/" .. E_RETRIES
-                .. "\n" .. result
-            )
-
-            if not waitActive(0.3, id) then
-                return false, "cancelled"
-            end
-        end
-    end
-
-    if not success then
-        return false, result
-    end
-
-    -- WAIT 7 SECONDS AFTER E
-    -- STAY AT CANDY
-
+    -- WAIT 7 SECONDS AT CANDY
     local startTime = os.clock()
 
     while active(id) do
@@ -663,9 +722,8 @@ local function collectCandy(candy, id)
         end
 
         setStatus(
-            "WAITING AT CANDY"
-            .. "\nRARITY: "
-            .. (rarityMap[candy] or "Unknown")
+            "CANDY: " .. rarity
+            .. "\nWAITING AT CANDY"
             .. "\nHOME IN "
             .. math.ceil(remaining) .. "s"
         )
@@ -674,10 +732,10 @@ local function collectCandy(candy, id)
     end
 
     if not active(id) then
-        return false, "cancelled"
+        return "cancelled"
     end
 
-    return true, result
+    return "triggered"
 end
 
 --========================================
@@ -711,7 +769,7 @@ end)
 startBtn.MouseButton1Click:Connect(function()
     if running then
         stop()
-        setStatus("STOPPED")
+        setStatus("STOPPED BY USER")
         return
     end
 
@@ -719,116 +777,157 @@ startBtn.MouseButton1Click:Connect(function()
     runId += 1
 
     local id = runId
-
     collected = 0
-    round = 0
-    attempts = {}
+    attempted = 0
 
     startBtn.Text = "STOP COLLECT"
     startBtn.BackgroundColor3 =
         Color3.fromRGB(215, 55, 65)
 
     task.spawn(function()
-        -- Initial fast scan
-        if not scanNewCandies(id) then
-            return
-        end
-
         while active(id) do
-            round += 1
 
-            -- Scan newly spawned candies
+            -- Scan only new candies
             if not scanNewCandies(id) then
                 break
             end
 
             local candies = getSortedCandies()
 
+            -- Do not auto-stop when folder empty
             if #candies == 0 then
-                setStatus("ALL CANDIES REMOVED")
-                break
+                setStatus(
+                    "NO CANDIES"
+                    .. "\nWAITING FOR RESPAWN"
+                )
+
+                if not waitActive(1, id) then
+                    break
+                end
+
+                continue
             end
 
             local target = nil
 
             for _, candy in ipairs(candies) do
-                if (attempts[candy] or 0) < 2 then
+                if (retryAt[candy] or 0) <= os.clock() then
                     target = candy
                     break
                 end
             end
 
+            -- All targets temporarily unavailable
             if not target then
                 setStatus(
-                    "TEST COMPLETE"
-                    .. "\nSOME CANDIES REMAIN"
+                    "ALL TARGETS ON COOLDOWN"
+                    .. "\nRETRYING..."
+                    .. "\nE ACTIVATIONS: " .. collected
                 )
-                break
+
+                if not waitActive(0.5, id) then
+                    break
+                end
+
+                continue
             end
 
-            local rarity =
-                rarityMap[target] or "Unknown"
+            local rarity = rarityMap[target] or "Unknown"
 
             setStatus(
-                "ROUND: " .. round
-                .. "\nPRIORITY: " .. rarity
+                "PRIORITY: " .. rarity
                 .. "\nTARGET: " .. target.Name
             )
 
-            local success, result =
-                collectCandy(target, id)
+            local result = collectCandy(target, id)
 
             if not active(id) then
                 break
             end
 
-            attempts[target] =
-                (attempts[target] or 0) + 1
+            -- Switch targets without stopping
+            if result == "switch_target" then
+                if not waitActive(0.1, id) then
+                    break
+                end
 
-            if not success then
-                setStatus(
-                    "COLLECT FAILED"
-                    .. "\n" .. result
-                    .. "\nSTOPPED AT CANDY"
-                )
-                stop()
-                return
+                continue
             end
 
-            if result ~= "already_removed" then
+            attempted += 1
+
+            if result == "triggered"
+                or result == "removed" then
+
                 collected += 1
+
+                setStatus(
+                    "E ACTIVATED: " .. collected
+                    .. "\nRETURNING HOME"
+                )
+
+                teleport(HOME)
+
+                if not waitActive(HOME_PAUSE, id) then
+                    break
+                end
+
+                -- Prevent immediately retrying
+                -- the same object if it remains.
+                retryAt[target] = os.clock() + RETRY_DELAY
+
+            elseif result == "no_prompt" then
+
+                retryAt[target] =
+                    os.clock() + RETRY_DELAY
+
+                setStatus(
+                    "NO PROXIMITY PROMPT"
+                    .. "\nSKIPPING TEMPORARILY"
+                    .. "\nSTART REMAINS ACTIVE"
+                )
+
+                -- No automatic STOP
+                if not waitActive(0.2, id) then
+                    break
+                end
+
+            elseif result == "unconfirmed" then
+
+                retryAt[target] =
+                    os.clock() + RETRY_DELAY
+
+                setStatus(
+                    "E NOT CONFIRMED"
+                    .. "\nRETRYING LATER"
+                    .. "\nSTART REMAINS ACTIVE"
+                )
+
+                if not waitActive(0.2, id) then
+                    break
+                end
+
+            else
+
+                retryAt[target] =
+                    os.clock() + RETRY_DELAY
+
+                setStatus(
+                    "RESULT: " .. result
+                    .. "\nTRYING NEXT TARGET"
+                )
+
+                if not waitActive(0.2, id) then
+                    break
+                end
             end
-
-            -- After 7 seconds, return HOME
-            setStatus(
-                "RETURNING HOME"
-                .. "\nE ACTIVATIONS: " .. collected
-            )
-
-            teleport(HOME)
-
-            if not waitActive(HOME_PAUSE, id) then
-                break
-            end
-
-            -- Next loop will select the
-            -- highest remaining priority.
-        end
-
-        if active(id) then
-            teleport(HOME)
-            stop()
         end
     end)
 end)
 
---========================================
--- READY
---========================================
-
 setStatus(
-    "V15 READY | HOME SAVED"
-    .. "\nSCAN WAIT: 0.20s"
+    "V16 READY | HOME SAVED"
+    .. "\nSCAN: 0.20s"
     .. "\nWAIT AFTER E: 7s"
     .. "\nCANDIES: " .. #getCandies()
 )
