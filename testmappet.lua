@@ -1,10 +1,10 @@
 
---========================================
--- CANDY COLLECTOR V10
--- TELEPORT + HOLD E + HOME DELIVERY
--- WAIT AT HOME: 8 SECONDS
+--====================================
+-- CANDY COLLECTOR V11
+-- TELEPORT -> HOLD E -> WAIT 8S
+-- -> HOME -> NEXT CANDY -> LOOP
 -- SINGLE LOCALSCRIPT
---========================================
+--====================================
 
 local Players = game:GetService("Players")
 local PPS = game:GetService("ProximityPromptService")
@@ -13,27 +13,29 @@ local player = Players.LocalPlayer
 local folder = workspace:WaitForChild("HalloweenCandy")
 local pg = player:WaitForChild("PlayerGui")
 
-local character = player.Character or player.CharacterAdded:Wait()
-local root = character:WaitForChild("HumanoidRootPart")
+local char = player.Character or player.CharacterAdded:Wait()
+local root = char:WaitForChild("HumanoidRootPart")
 
 -- SETTINGS
-local HOME_WAIT = 8
-local PROMPT_TIMEOUT = 2
+local WAIT_AFTER_E = 8
+local PROMPT_TIMEOUT = 2.5
 local HOLD_EXTRA = 0.2
 local ARRIVAL_HEIGHT = 2
-local HOME_TOLERANCE = 6
+local HOME_PAUSE = 0.5
+local ROUND_PAUSE = 2
 
--- SAVE HOME ON SCRIPT START
-local HOME = character:GetPivot()
+-- Save HOME when script starts
+local HOME = char:GetPivot()
 
 local running = false
 local runId = 0
 local currentPrompt = nil
 local visiblePrompts = {}
-local visited = {}
-local total = 0
 
--- PROMPT DETECTION
+local round = 0
+local attempted = 0
+
+-- Detect visible prompts
 PPS.PromptShown:Connect(function(prompt)
     visiblePrompts[prompt] = true
 end)
@@ -43,11 +45,11 @@ PPS.PromptHidden:Connect(function(prompt)
 end)
 
 -- UI
-local old = pg:FindFirstChild("CandyV10")
+local old = pg:FindFirstChild("CandyV11")
 if old then old:Destroy() end
 
 local gui = Instance.new("ScreenGui")
-gui.Name = "CandyV10"
+gui.Name = "CandyV11"
 gui.ResetOnSpawn = false
 gui.Parent = pg
 
@@ -62,7 +64,7 @@ frame.Parent = gui
 Instance.new("UICorner", frame).CornerRadius =
     UDim.new(0, 12)
 
-local function makeButton(text, y, color)
+local function button(text, y, color)
     local b = Instance.new("TextButton")
     b.Size = UDim2.new(1, -20, 0, 48)
     b.Position = UDim2.fromOffset(10, y)
@@ -79,45 +81,42 @@ local function makeButton(text, y, color)
     return b
 end
 
-local homeBtn = makeButton(
+local homeBtn = button(
     "HOME", 12, Color3.fromRGB(45, 110, 220)
 )
 
-local startBtn = makeButton(
+local startBtn = button(
     "START COLLECT", 72, Color3.fromRGB(30, 175, 90)
 )
 
 local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -20, 0, 95)
+status.Size = UDim2.new(1, -20, 0, 100)
 status.Position = UDim2.fromOffset(10, 132)
 status.BackgroundTransparency = 1
 status.TextColor3 = Color3.new(1, 1, 1)
-status.TextSize = 14
 status.Font = Enum.Font.Gotham
+status.TextSize = 13
 status.TextWrapped = true
 status.Text = "READY | HOME SAVED"
 status.Parent = frame
 
 local function setStatus(msg)
     status.Text = msg
-    print("[CANDY V10]", msg)
+    print("[CANDY V11]", msg)
 end
 
-local function getRoot()
-    local c = player.Character
-    return c and c:FindFirstChild("HumanoidRootPart")
-end
-
+-- TELEPORT
 local function teleport(cf)
-    local c = player.Character
-    if not c then return false end
+    local character = player.Character
+    if not character then return false end
 
-    c:PivotTo(cf)
+    character:PivotTo(cf)
 
-    local r = getRoot()
-    if r then
-        r.AssemblyLinearVelocity = Vector3.zero
-        r.AssemblyAngularVelocity = Vector3.zero
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+
+    if hrp then
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
     end
 
     return true
@@ -143,39 +142,35 @@ end
 
 -- FIND CANDIES
 local function getCandies()
-    local list = {}
+    local result = {}
 
-    for _, obj in ipairs(folder:GetChildren()) do
-        if obj.Name:match("^Candy_")
-            and obj:IsA("BasePart") then
-            table.insert(list, obj)
+    for _, candy in ipairs(folder:GetChildren()) do
+        if candy.Name:match("^Candy_")
+            and candy:IsA("BasePart") then
+            table.insert(result, candy)
         end
     end
 
-    return list
+    return result
 end
 
-local function getPromptPosition(prompt)
+local function promptPosition(prompt)
     local p = prompt.Parent
     if not p then return nil end
 
     if p:IsA("Attachment") then
         return p.WorldPosition
-    end
-
-    if p:IsA("BasePart") then
+    elseif p:IsA("BasePart") then
         return p.Position
-    end
-
-    if p:IsA("Model") then
+    elseif p:IsA("Model") then
         return p:GetPivot().Position
     end
 
     return nil
 end
 
--- FIND E PROMPT NEAR CANDY
 local function findPrompt(candy)
+    -- Prompt inside candy
     local own = candy:FindFirstChildWhichIsA(
         "ProximityPrompt", true
     )
@@ -184,6 +179,7 @@ local function findPrompt(candy)
         return own
     end
 
+    -- Nearby visible E prompt
     local best = nil
     local bestDistance = math.huge
 
@@ -192,7 +188,7 @@ local function findPrompt(candy)
             and prompt.Enabled
             and prompt.KeyboardKeyCode == Enum.KeyCode.E then
 
-            local pos = getPromptPosition(prompt)
+            local pos = promptPosition(prompt)
 
             if pos then
                 local distance =
@@ -200,6 +196,7 @@ local function findPrompt(candy)
 
                 if distance <= 6
                     and distance < bestDistance then
+
                     best = prompt
                     bestDistance = distance
                 end
@@ -210,13 +207,14 @@ local function findPrompt(candy)
     return best
 end
 
--- COLLECT CANDY
+-- COLLECT ONE CANDY
 local function collectCandy(candy, id)
     if not candy:IsDescendantOf(folder) then
-        return true
+        return "already_removed"
     end
 
-    setStatus("TELEPORTING TO\n" .. candy.Name)
+    -- 1. TELEPORT TO CANDY
+    setStatus("TELEPORT TO\n" .. candy.Name)
 
     teleport(CFrame.new(
         candy.Position + Vector3.new(
@@ -225,16 +223,16 @@ local function collectCandy(candy, id)
     ))
 
     if not waitActive(0.3, id) then
-        return false
+        return "cancelled"
     end
 
-    -- WAIT FOR E PROMPT
+    -- 2. FIND E PROMPT
     local prompt = nil
     local deadline = os.clock() + PROMPT_TIMEOUT
 
     while os.clock() < deadline do
         if not active(id) then
-            return false
+            return "cancelled"
         end
 
         prompt = findPrompt(candy)
@@ -247,11 +245,10 @@ local function collectCandy(candy, id)
     end
 
     if not prompt then
-        setStatus("NO E PROMPT\n" .. candy.Name)
-        return false
+        return "no_prompt"
     end
 
-    -- HOLD E
+    -- 3. HOLD E
     local triggered = false
 
     local connection = prompt.Triggered:Connect(function()
@@ -266,9 +263,9 @@ local function collectCandy(candy, id)
     setStatus(
         "HOLDING E\n"
         .. candy.Name
-        .. "\n"
+        .. "\nDuration: "
         .. string.format("%.2f", holdTime)
-        .. " seconds"
+        .. "s"
     )
 
     prompt:InputHoldBegin()
@@ -280,100 +277,49 @@ local function collectCandy(candy, id)
 
     if not completed then
         connection:Disconnect()
-        return false
+        return "cancelled"
     end
 
-    -- WAIT BRIEFLY FOR THE TRIGGER EVENT
-    local confirmDeadline = os.clock() + 0.6
+    -- 4. WAIT 8 SECONDS AT CANDY
+    -- Do not teleport HOME yet
 
-    while os.clock() < confirmDeadline do
-        if not active(id) then
-            connection:Disconnect()
-            return false
-        end
-
-        if triggered or not candy:IsDescendantOf(folder) then
-            break
-        end
-
-        task.wait(0.05)
-    end
-
-    connection:Disconnect()
-
-    return triggered or not candy:IsDescendantOf(folder)
-end
-
--- GO HOME AND WAIT 8 SECONDS
-local function deliverAtHome(id)
-    if not active(id) then
-        return false
-    end
-
-    setStatus("TELEPORTING HOME...")
-
-    if not teleport(HOME) then
-        return false
-    end
-
-    -- Allow character position to update
-    if not waitActive(0.25, id) then
-        return false
-    end
-
-    local r = getRoot()
-
-    if not r then
-        setStatus("HOME ERROR: NO CHARACTER")
-        return false
-    end
-
-    -- Verify player arrived at Home
-    local distance = (r.Position - HOME.Position).Magnitude
-
-    if distance > HOME_TOLERANCE then
-        setStatus("HOME POSITION NOT CONFIRMED")
-        return false
-    end
-
-    -- Wait on the delivery pad
     local startTime = os.clock()
 
     while active(id) do
         local elapsed = os.clock() - startTime
-        local remaining = HOME_WAIT - elapsed
+        local remaining = WAIT_AFTER_E - elapsed
 
         if remaining <= 0 then
             break
         end
 
-        -- Make sure character stays near Home
-        local hrp = getRoot()
-
-        if not hrp or
-            (hrp.Position - HOME.Position).Magnitude
-                > HOME_TOLERANCE then
-            setStatus("LEFT HOME PAD - STOPPED")
-            return false
-        end
-
         setStatus(
-            "HOME DELIVERY\n"
-            .. "Waiting: "
+            "WAITING AT CANDY\n"
+            .. candy.Name
+            .. "\nHOME IN "
             .. math.ceil(remaining)
-            .. " seconds\n"
-            .. "Attempted: " .. total
+            .. " SECONDS"
         )
 
         task.wait(0.1)
     end
 
     if not active(id) then
-        return false
+        connection:Disconnect()
+        return "cancelled"
     end
 
-    setStatus("HOME WAIT COMPLETE | 8s")
-    return true
+    connection:Disconnect()
+
+    if not candy:IsDescendantOf(folder) then
+        return "removed"
+    end
+
+    if triggered then
+        return "triggered"
+    end
+
+    return "not_confirmed"
 end
 
 -- STOP
@@ -398,7 +344,7 @@ homeBtn.MouseButton1Click:Connect(function()
     setStatus("RETURNED HOME")
 end)
 
--- START / STOP
+-- START / STOP BUTTON
 startBtn.MouseButton1Click:Connect(function()
     if running then
         stop()
@@ -411,8 +357,8 @@ startBtn.MouseButton1Click:Connect(function()
 
     local id = runId
 
-    visited = {}
-    total = 0
+    round = 0
+    attempted = 0
 
     startBtn.Text = "STOP COLLECT"
     startBtn.BackgroundColor3 =
@@ -420,63 +366,76 @@ startBtn.MouseButton1Click:Connect(function()
 
     task.spawn(function()
         while active(id) do
+            round += 1
+
             local candies = getCandies()
-            local target = nil
 
-            -- Find next unvisited candy
-            for _, candy in ipairs(candies) do
-                if not visited[candy] then
-                    target = candy
-                    break
-                end
-            end
-
-            if not target then
-                if #candies == 0 then
-                    setStatus("ALL CANDY OBJECTS REMOVED")
-                else
-                    setStatus(
-                        "ROUND COMPLETE\n"
-                        .. "Attempted: " .. total
-                        .. "\nRemaining objects: "
-                        .. #candies
-                    )
-                end
+            if #candies == 0 then
+                setStatus("ALL CANDIES REMOVED")
                 break
             end
 
-            -- Mark candy as visited
-            visited[target] = true
+            setStatus(
+                "ROUND: " .. round
+                .. "\nCANDIES FOUND: "
+                .. #candies
+            )
 
-            local success = collectCandy(target, id)
+            -- Visit every candy in this round
+            for index, candy in ipairs(candies) do
+                if not active(id) then
+                    break
+                end
+
+                if candy:IsDescendantOf(folder) then
+                    setStatus(
+                        "ROUND: " .. round
+                        .. "\nCANDY: "
+                        .. index .. "/" .. #candies
+                    )
+
+                    local result = collectCandy(candy, id)
+
+                    if not active(id) then
+                        break
+                    end
+
+                    attempted += 1
+
+                    setStatus(
+                        "RESULT: " .. result
+                        .. "\nRETURNING HOME"
+                    )
+
+                    -- 5. TELEPORT HOME AFTER
+                    -- THE FULL 8-SECOND WAIT
+                    teleport(HOME)
+
+                    if not waitActive(HOME_PAUSE, id) then
+                        break
+                    end
+                end
+            end
 
             if not active(id) then
                 break
             end
 
-            -- Do not skip to another candy
-            -- when the interaction fails
-            if not success then
-                setStatus(
-                    "E NOT CONFIRMED\n"
-                    .. target.Name
-                    .. "\nReturning HOME"
-                )
+            -- 6. SCAN ALL CANDIES AGAIN
+            local remaining = getCandies()
 
-                teleport(HOME)
+            if #remaining == 0 then
+                setStatus("FINISHED | ALL REMOVED")
                 break
             end
 
-            total += 1
+            setStatus(
+                "ROUND COMPLETE: " .. round
+                .. "\nREMAINING: " .. #remaining
+                .. "\nRESTARTING LOOP..."
+            )
 
-            -- IMPORTANT:
-            -- Go HOME before starting the 8s timer
-            if not deliverAtHome(id) then
-                break
-            end
-
-            -- Only now proceed to next candy
-            if not waitActive(0.2, id) then
+            if not waitActive(ROUND_PAUSE, id) then
                 break
             end
         end
@@ -491,5 +450,5 @@ end)
 setStatus(
     "READY | HOME SAVED\n"
     .. "CANDIES: " .. #getCandies()
-    .. "\nHOME WAIT: 8 SECONDS"
+    .. "\nWAIT AFTER E: 8 SECONDS"
 )
