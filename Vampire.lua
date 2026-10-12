@@ -1,106 +1,164 @@
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
 
 local LocalPlayer = Players.LocalPlayer
 
 -- SETTINGS
 local BOSS_NAME = "Housewife Mosquito"
-local HITBOX_MULTIPLIER = 5
-local DISTANCE = 3
+local ATTACK_DISTANCE = 2.5
+local UPDATE_INTERVAL = 0.15
+
+local Enabled = false
+local CurrentBoss = nil
+local Moving = false
+
+local function GetCharacter()
+    local character = LocalPlayer.Character
+    if not character then return nil, nil end
+
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+
+    return root, humanoid
+end
 
 local function FindBoss()
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("Model")
-            and string.find(
-                string.lower(obj.Name),
-                string.lower(BOSS_NAME),
-                1,
-                true
-            ) then
+    local playerRoot = GetCharacter()
+    local nearest = nil
+    local nearestDistance = math.huge
 
-            local root =
-                obj:FindFirstChild("HumanoidRootPart", true)
-                or obj.PrimaryPart
-                or obj:FindFirstChildWhichIsA("BasePart", true)
+    for _, model in ipairs(workspace:GetDescendants()) do
+        if model:IsA("Model") then
 
-            if root then
-                return obj, root
+            local humanoid =
+                model:FindFirstChildOfClass("Humanoid")
+
+            local nameMatch =
+                string.find(
+                    string.lower(model.Name),
+                    string.lower(BOSS_NAME),
+                    1,
+                    true
+                )
+
+            local displayMatch = humanoid and
+                string.find(
+                    string.lower(humanoid.DisplayName),
+                    string.lower(BOSS_NAME),
+                    1,
+                    true
+                )
+
+            if nameMatch or displayMatch then
+
+                local root =
+                    model:FindFirstChild("HumanoidRootPart", true)
+                    or model.PrimaryPart
+
+                if root and
+                    (not humanoid or humanoid.Health > 0) then
+
+                    local distance = playerRoot
+                        and (root.Position - playerRoot.Position).Magnitude
+                        or 0
+
+                    if distance < nearestDistance then
+                        nearest = root
+                        nearestDistance = distance
+                    end
+                end
             end
         end
     end
 
-    return nil, nil
+    return nearest
 end
 
-local OriginalSizes = {}
+local function StopMoving()
+    local root, humanoid = GetCharacter()
 
-local function ExpandBoss()
-    local boss, root = FindBoss()
+    if root and humanoid then
+        humanoid:MoveTo(root.Position)
+    end
 
-    if not boss then
-        warn("Boss not found!")
+    Moving = false
+end
+
+local elapsed = 0
+local searchElapsed = 1
+
+RunService.Heartbeat:Connect(function(dt)
+    if not Enabled then return end
+
+    elapsed = elapsed + dt
+    searchElapsed = searchElapsed + dt
+
+    if elapsed < UPDATE_INTERVAL then return end
+    elapsed = 0
+
+    local root, humanoid = GetCharacter()
+    if not root or not humanoid then return end
+    if humanoid.Health <= 0 then return end
+
+    if searchElapsed >= 1
+        or not CurrentBoss
+        or not CurrentBoss.Parent then
+
+        CurrentBoss = FindBoss()
+        searchElapsed = 0
+    end
+
+    if not CurrentBoss then
+        if Moving then StopMoving() end
         return
     end
 
-    if not OriginalSizes[root] then
-        OriginalSizes[root] = root.Size
-    end
-
-    local original = OriginalSizes[root]
-
-    root.Size = Vector3.new(
-        original.X * HITBOX_MULTIPLIER,
-        original.Y,
-        original.Z * HITBOX_MULTIPLIER
-    )
-
-    root.CanCollide = false
-    root.Transparency = 0.6
-
-    print("Boss Hitbox Expanded!")
-end
-
-local function MoveNearBoss()
-    local character = LocalPlayer.Character
-    if not character then return end
-
-    local playerRoot =
-        character:FindFirstChild("HumanoidRootPart")
-
-    local boss, bossRoot = FindBoss()
-
-    if not playerRoot or not bossRoot then
-        warn("Boss or player not found!")
-        return
-    end
-
-    local direction = Vector3.new(
-        playerRoot.Position.X - bossRoot.Position.X,
+    local offset = Vector3.new(
+        root.Position.X - CurrentBoss.Position.X,
         0,
-        playerRoot.Position.Z - bossRoot.Position.Z
+        root.Position.Z - CurrentBoss.Position.Z
     )
 
-    if direction.Magnitude < 0.01 then
-        direction = Vector3.new(1, 0, 0)
+    local distance = offset.Magnitude
+
+    if distance > ATTACK_DISTANCE + 0.3 then
+
+        local direction = distance > 0.01
+            and offset.Unit
+            or Vector3.new(1, 0, 0)
+
+        local target =
+            CurrentBoss.Position
+            + direction * ATTACK_DISTANCE
+
+        humanoid:MoveTo(Vector3.new(
+            target.X,
+            root.Position.Y,
+            target.Z
+        ))
+
+        Moving = true
+
+    elseif Moving then
+        StopMoving()
     end
+end)
 
-    local position =
-        bossRoot.Position
-        + direction.Unit * DISTANCE
-        + Vector3.new(0, -1, 0)
-
-    playerRoot.CFrame =
-        CFrame.lookAt(position, bossRoot.Position)
-end
-
--- Expand hitbox
-ExpandBoss()
-
--- Press V to move near boss
 UIS.InputBegan:Connect(function(input, processed)
     if processed then return end
 
     if input.KeyCode == Enum.KeyCode.V then
-        MoveNearBoss()
+        Enabled = not Enabled
+
+        if Enabled then
+            CurrentBoss = FindBoss()
+            print("Boss Follow: ON")
+        else
+            StopMoving()
+            print("Boss Follow: OFF")
+        end
     end
 end)
+
+print("Loaded! Press V to toggle Boss Follow")
