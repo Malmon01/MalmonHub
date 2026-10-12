@@ -1,31 +1,24 @@
 
 --========================================
--- CANDY COLLECTOR V15
--- Delta Executor / Roblox Luau
+-- CANDY COLLECTOR V16
+-- ALL IN ONE / DELTA
 --========================================
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local UIS = game:GetService("UserInputService")
 local VirtualUser = game:GetService("VirtualUser")
-local PromptService =
-    game:GetService("ProximityPromptService")
 
 local Player = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
 
 -- SETTINGS
 local SCAN_WAIT = 0.20
-local SEND_WAIT = 8
+local DELIVERY_WAIT = 8
 local NEAR_DISTANCE = 25
-local PROMPT_TIMEOUT = 3
-local HOLD_EXTRA = 0.20
-local MAX_RETRIES = 2
-
-local SEND_POINT = Vector3.new(
-    -45837,
-    40374,
-    -20116
+local PICKUP_TIMEOUT = 2.5
+local SEND_POSITION = Vector3.new(
+    -45837, 40374, -20116
 )
 
 local PRIORITY = {
@@ -34,31 +27,36 @@ local PRIORITY = {
     Epic = 4,
     Rare = 3,
     Uncommon = 2,
-    Common = 1,
-    Unclassified = 0
+    Common = 1
 }
 
--- STOP PREVIOUS V15
 local ENV = (
     type(getgenv) == "function"
     and getgenv()
 ) or _G
 
+-- Stop previous version
 if type(ENV.CandyV15Stop) == "function" then
     pcall(ENV.CandyV15Stop)
 end
 
+if type(ENV.CandyV16Stop) == "function" then
+    pcall(ENV.CandyV16Stop)
+end
+
 local Alive = true
 local Running = false
-local SentCount = 0
-local FailedUntil = {}
+local DeliveryAttempts = 0
 local Connections = {}
+local Prompts = {}
+local FailedUntil = {}
 
-local OldGui =
-    PlayerGui:FindFirstChild("CandyV15")
+local oldGui = PlayerGui:FindFirstChild(
+    "CandyCollectorV16"
+)
 
-if OldGui then
-    OldGui:Destroy()
+if oldGui then
+    oldGui:Destroy()
 end
 
 --========================================
@@ -66,96 +64,98 @@ end
 --========================================
 
 local Gui = Instance.new("ScreenGui")
-Gui.Name = "CandyV15"
+Gui.Name = "CandyCollectorV16"
 Gui.ResetOnSpawn = false
 Gui.DisplayOrder = 99999
 Gui.Parent = PlayerGui
 
 local Main = Instance.new("Frame")
-Main.Size = UDim2.fromOffset(285, 220)
-Main.Position = UDim2.fromScale(0.5, 0.4)
+Main.Size = UDim2.fromOffset(310, 252)
+Main.Position = UDim2.fromScale(0.5, 0.37)
 Main.AnchorPoint = Vector2.new(0.5, 0.5)
-Main.BackgroundColor3 = Color3.fromRGB(24, 27, 37)
+Main.BackgroundColor3 = Color3.fromRGB(23, 26, 36)
 Main.BorderSizePixel = 0
 Main.Active = true
 Main.Parent = Gui
 
-local Corner = Instance.new("UICorner")
-Corner.CornerRadius = UDim.new(0, 10)
-Corner.Parent = Main
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 10)
+corner.Parent = Main
 
-local Stroke = Instance.new("UIStroke")
-Stroke.Color = Color3.fromRGB(86, 135, 255)
-Stroke.Thickness = 2
-Stroke.Parent = Main
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(75, 130, 255)
+stroke.Thickness = 2
+stroke.Parent = Main
 
-local function Label(text, y, height, size)
-    local obj = Instance.new("TextLabel")
-    obj.Size = UDim2.new(1, -20, 0, height)
-    obj.Position = UDim2.fromOffset(10, y)
-    obj.BackgroundTransparency = 1
+local function CreateLabel(text, y, height, size)
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -20, 0, height)
+    label.Position = UDim2.fromOffset(10, y)
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextSize = size or 13
+    label.Font = Enum.Font.GothamBold
+    label.TextWrapped = true
+    label.Parent = Main
+    return label
+end
+
+local Title = CreateLabel(
+    "CANDY COLLECTOR V16", 7, 30, 17
+)
+
+local Status = CreateLabel(
+    "Status: Ready", 43, 27
+)
+
+local TargetText = CreateLabel(
+    "Target: None", 72, 26
+)
+
+local ScanText = CreateLabel(
+    "Candy found: 0", 101, 25
+)
+
+local DistanceText = CreateLabel(
+    "Delivery distance: -", 130, 25
+)
+
+local CountText = CreateLabel(
+    "Delivery attempts: 0", 158, 25
+)
+
+local function Button(text, x, color)
+    local obj = Instance.new("TextButton")
+    obj.Size = UDim2.fromOffset(132, 42)
+    obj.Position = UDim2.fromOffset(x, 195)
+    obj.BackgroundColor3 = color
     obj.Text = text
     obj.TextColor3 = Color3.new(1, 1, 1)
     obj.Font = Enum.Font.GothamBold
-    obj.TextSize = size
-    obj.TextWrapped = true
+    obj.TextSize = 13
     obj.Parent = Main
+
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 7)
+    c.Parent = obj
+
     return obj
 end
 
-local Title = Label(
-    "CANDY COLLECTOR V15", 8, 28, 17
+local StartButton = Button(
+    "START COLLECT", 12,
+    Color3.fromRGB(35, 180, 85)
 )
 
-local Status = Label(
-    "Status: Ready", 43, 27, 12
-)
-
-local TargetLabel = Label(
-    "Target: None", 72, 25, 12
-)
-
-local CountLabel = Label(
-    "Delivery attempts: 0", 101, 25, 12
-)
-
-local DistanceLabel = Label(
-    "Distance: -", 130, 22, 12
-)
-
-local function MakeButton(text, x, color)
-    local button = Instance.new("TextButton")
-    button.Size = UDim2.fromOffset(122, 38)
-    button.Position = UDim2.fromOffset(x, 170)
-    button.BackgroundColor3 = color
-    button.Text = text
-    button.TextColor3 = Color3.new(1, 1, 1)
-    button.Font = Enum.Font.GothamBold
-    button.TextSize = 13
-    button.Parent = Main
-
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 7)
-    corner.Parent = button
-
-    return button
-end
-
-local StartButton = MakeButton(
-    "START COLLECT",
-    12,
-    Color3.fromRGB(30, 180, 85)
-)
-
-local CloseButton = MakeButton(
-    "CLOSE",
-    151,
+local CloseButton = Button(
+    "CLOSE", 166,
     Color3.fromRGB(190, 60, 65)
 )
 
-local function SetStatus(message)
+local function SetStatus(text)
     if Alive and Status.Parent then
-        Status.Text = "Status: " .. message
+        Status.Text = "Status: " .. text
     end
 end
 
@@ -165,55 +165,34 @@ end
 
 local function GetRoot()
     local character = Player.Character
-    if not character then return nil end
+
+    if not character then
+        return nil
+    end
 
     return character:FindFirstChild(
         "HumanoidRootPart"
     )
 end
 
-local function TeleportTo(position)
+local function Teleport(position)
     local root = GetRoot()
-    if not root then return false end
+
+    if not root then
+        return false
+    end
 
     root.AssemblyLinearVelocity = Vector3.zero
-
     root.CFrame = CFrame.new(position)
 
     return true
 end
 
 --========================================
--- ANTI-IDLE
+-- RARITY
 --========================================
 
-local IdleConnection = Player.Idled:Connect(function()
-    if not Alive then return end
-
-    pcall(function()
-        VirtualUser:CaptureController()
-        VirtualUser:ClickButton2(Vector2.zero)
-    end)
-
-    print("[ANTI-IDLE] Activity sent")
-end)
-
-table.insert(Connections, IdleConnection)
-
---========================================
--- RARITY DETECTION
---========================================
-
-local RarityWords = {
-    "Unknown",
-    "Legendary",
-    "Epic",
-    "Rare",
-    "Uncommon",
-    "Common"
-}
-
-local function ParseRarity(text)
+local function DetectRarity(text)
     if type(text) ~= "string" then
         return nil
     end
@@ -221,7 +200,7 @@ local function ParseRarity(text)
     local lower = text:lower()
 
     for word in lower:gmatch("%a+") do
-        for _, rarity in ipairs(RarityWords) do
+        for rarity in pairs(PRIORITY) do
             if word == rarity:lower() then
                 return rarity
             end
@@ -231,72 +210,48 @@ local function ParseRarity(text)
     return nil
 end
 
-local function CheckRarity(obj)
-    if not obj then return nil end
+--========================================
+-- UNIVERSAL CANDY DETECTION
+--========================================
 
-    local attributes = {
-        "Rarity",
-        "CandyRarity",
-        "Tier",
-        "Grade",
-        "Quality"
-    }
-
-    for _, name in ipairs(attributes) do
-        local value = obj:GetAttribute(name)
-
-        if value ~= nil then
-            local result =
-                ParseRarity(tostring(value))
-
-            if result then return result end
-        end
+local function RegisterPrompt(obj)
+    if obj:IsA("ProximityPrompt") then
+        Prompts[obj] = true
     end
-
-    for _, child in ipairs(obj:GetDescendants()) do
-
-        if child:IsA("StringValue") then
-            if ParseRarity(child.Name) or
-                child.Name:lower():find("rarity") then
-
-                local result =
-                    ParseRarity(child.Value)
-
-                if result then return result end
-            end
-        end
-
-        if child:IsA("TextLabel") then
-            local result = ParseRarity(child.Text)
-
-            if result then return result end
-        end
-    end
-
-    return ParseRarity(obj.Name)
 end
 
---========================================
--- CANDY SCANNER
---========================================
+local function InitialScan()
+    local descendants = Workspace:GetDescendants()
 
-local function GetCandyFolder()
-    return Workspace:FindFirstChild(
-        "HalloweenCandy"
+    for i, obj in ipairs(descendants) do
+        RegisterPrompt(obj)
+
+        if i % 500 == 0 then
+            task.wait()
+        end
+    end
+end
+
+table.insert(
+    Connections,
+    Workspace.DescendantAdded:Connect(
+        RegisterPrompt
     )
-end
+)
 
 local function GetPromptPosition(prompt)
-    local parent = prompt.Parent
+    local obj = prompt.Parent
 
-    if not parent then return nil end
-
-    if parent:IsA("Attachment") then
-        return parent.WorldPosition
+    if not obj then
+        return nil
     end
 
-    if parent:IsA("BasePart") then
-        return parent.Position
+    if obj:IsA("Attachment") then
+        return obj.WorldPosition
+    end
+
+    if obj:IsA("BasePart") then
+        return obj.Position
     end
 
     local part = prompt:FindFirstAncestorWhichIsA(
@@ -310,206 +265,148 @@ local function GetPromptPosition(prompt)
     return nil
 end
 
-local function GetCandyRarity(prompt, folder)
-    local current = prompt.Parent
+local function GetCandyInfo(prompt)
+    if not prompt.Enabled then
+        return nil
+    end
 
-    while current and current ~= folder do
-        local rarity = nil
+    local words = {
+        prompt.ObjectText,
+        prompt.ActionText
+    }
 
-        if current:IsA("Model") then
-            rarity = CheckRarity(current)
-        else
-            rarity = ParseRarity(current.Name)
+    local node = prompt.Parent
 
-            for _, name in ipairs({
-                "Rarity",
-                "CandyRarity"
-            }) do
-                local value = current:GetAttribute(name)
+    -- Inspect nearby hierarchy
+    for i = 1, 6 do
+        if not node or node == Workspace then
+            break
+        end
 
-                if value then
-                    rarity = rarity
-                        or ParseRarity(tostring(value))
+        table.insert(words, node.Name)
+
+        for _, key in ipairs({
+            "Rarity",
+            "CandyRarity",
+            "Tier"
+        }) do
+            local value = node:GetAttribute(key)
+
+            if value ~= nil then
+                table.insert(words, tostring(value))
+            end
+        end
+
+        -- Look at labels close to the prompt
+        if i <= 3 then
+            for _, child in ipairs(node:GetChildren()) do
+                if child:IsA("TextLabel") then
+                    table.insert(words, child.Text)
+                end
+
+                if child:IsA("BillboardGui") then
+                    for _, label in ipairs(
+                        child:GetDescendants()
+                    ) do
+                        if label:IsA("TextLabel") then
+                            table.insert(
+                                words,
+                                label.Text
+                            )
+                        end
+                    end
                 end
             end
         end
 
-        if rarity then return rarity end
-
-        current = current.Parent
+        node = node.Parent
     end
 
-    return ParseRarity(prompt.ObjectText)
-        or ParseRarity(prompt.ActionText)
-        or "Unclassified"
+    local combined = table.concat(words, " ")
+    local lower = combined:lower()
+
+    -- Must be associated with candy
+    if not lower:find("candy", 1, true) then
+        return nil
+    end
+
+    local rarity = DetectRarity(combined)
+
+    if not rarity then
+        rarity = "Unknown"
+    end
+
+    local position = GetPromptPosition(prompt)
+
+    if not position then
+        return nil
+    end
+
+    return {
+        Prompt = prompt,
+        Position = position,
+        Rarity = rarity,
+        Priority = PRIORITY[rarity],
+        Name = prompt.ObjectText
+    }
 end
 
-local function ScanCandies()
-    local folder = GetCandyFolder()
+--========================================
+-- TARGET SELECTION
+--========================================
+
+local function FindBestCandy()
     local root = GetRoot()
 
-    if not folder or not root then
-        return nil
+    if not root then
+        return nil, 0
     end
 
-    local candidates = {}
+    local best = nil
+    local count = 0
 
-    for _, obj in ipairs(folder:GetDescendants()) do
+    for prompt in pairs(Prompts) do
+        if not prompt.Parent
+            or not prompt:IsDescendantOf(Workspace) then
 
-        if obj:IsA("ProximityPrompt") then
+            Prompts[prompt] = nil
 
-            local blocked =
-                FailedUntil[obj] or 0
+        elseif os.clock() >=
+            (FailedUntil[prompt] or 0) then
 
-            if os.clock() >= blocked then
-                local position =
-                    GetPromptPosition(obj)
+            local info = GetCandyInfo(prompt)
 
-                if position then
-                    local rarity =
-                        GetCandyRarity(obj, folder)
+            if info then
+                count += 1
 
-                    table.insert(candidates, {
-                        Prompt = obj,
-                        Position = position,
-                        Rarity = rarity,
-                        Priority =
-                            PRIORITY[rarity] or 0,
+                info.Distance = (
+                    root.Position - info.Position
+                ).Magnitude
 
-                        Distance = (
-                            root.Position - position
-                        ).Magnitude
-                    })
+                if not best
+                    or info.Priority > best.Priority
+                    or (
+                        info.Priority == best.Priority
+                        and info.Distance < best.Distance
+                    ) then
+
+                    best = info
                 end
             end
         end
     end
 
-    if #candidates == 0 then
-        return nil
-    end
-
-    -- Highest rarity ALWAYS wins.
-    -- Distance is used only for equal rarity.
-    table.sort(candidates, function(a, b)
-        if a.Priority ~= b.Priority then
-            return a.Priority > b.Priority
-        end
-
-        return a.Distance < b.Distance
-    end)
-
-    return candidates[1]
+    return best, count
 end
 
 --========================================
--- PICKUP CONFIRMATION
+-- WAIT
 --========================================
 
-local function IsPickedUp(prompt, folder)
-    if not prompt or not prompt.Parent then
-        return true
-    end
+local function WaitActive(seconds)
+    local finish = os.clock() + seconds
 
-    if not prompt:IsDescendantOf(folder) then
-        return true
-    end
-
-    return false
-end
-
-local function TryPickup(target, folder)
-    local prompt = target.Prompt
-
-    if not prompt or not prompt.Parent then
-        return false
-    end
-
-    local position = target.Position
-
-    SetStatus("Teleporting to candy")
-
-    if not TeleportTo(
-        position + Vector3.new(0, 2.5, 0)
-    ) then
-        return false
-    end
-
-    task.wait(0.20)
-
-    if not Running or not Alive then
-        return false
-    end
-
-    local triggered = false
-
-    local conn = PromptService.PromptTriggered:Connect(
-        function(activePrompt, player)
-            if activePrompt == prompt
-                and player == Player then
-
-                triggered = true
-            end
-        end
-    )
-
-    local ok = pcall(function()
-        prompt:InputHoldBegin()
-
-        task.wait(
-            math.max(
-                0.15,
-                prompt.HoldDuration + HOLD_EXTRA
-            )
-        )
-
-        prompt:InputHoldEnd()
-    end)
-
-    -- Executor fallback
-    if (not ok or not triggered)
-        and type(fireproximityprompt) == "function"
-        and prompt.Parent then
-
-        pcall(function()
-            fireproximityprompt(prompt)
-        end)
-    end
-
-    local startTime = os.clock()
-    local confirmed = false
-
-    while os.clock() - startTime < PROMPT_TIMEOUT do
-
-        if not Alive or not Running then
-            break
-        end
-
-        if IsPickedUp(prompt, folder) then
-            confirmed = true
-            break
-        end
-
-        task.wait(0.10)
-    end
-
-    conn:Disconnect()
-
-    return confirmed
-end
-
---========================================
--- DISTANCE + DELIVERY
---========================================
-
-local function GetSendDistance(position)
-    return (position - SEND_POINT).Magnitude
-end
-
-local function WaitWhileRunning(seconds)
-    local deadline = os.clock() + seconds
-
-    while os.clock() < deadline do
+    while os.clock() < finish do
         if not Running or not Alive then
             return false
         end
@@ -520,48 +417,134 @@ local function WaitWhileRunning(seconds)
     return Running and Alive
 end
 
-local function DeliverCandy(target)
-    local distance =
-        GetSendDistance(target.Position)
+--========================================
+-- PICKUP
+--========================================
 
-    DistanceLabel.Text = string.format(
-        "Distance: %.0f studs",
+local function PickupCandy(target)
+    local prompt = target.Prompt
+
+    if not prompt or not prompt.Parent then
+        return false
+    end
+
+    SetStatus("Moving to candy")
+
+    local success = Teleport(
+        target.Position + Vector3.new(0, 2, 0)
+    )
+
+    if not success then
+        return false
+    end
+
+    if not WaitActive(0.25) then
+        return false
+    end
+
+    local triggered = false
+
+    local connection = prompt.Triggered:Connect(
+        function()
+            triggered = true
+        end
+    )
+
+    SetStatus("Holding E")
+
+    local holdDuration = math.max(
+        prompt.HoldDuration,
+        0.10
+    )
+
+    local ok = pcall(function()
+        prompt:InputHoldBegin()
+        task.wait(holdDuration + 0.20)
+        prompt:InputHoldEnd()
+    end)
+
+    -- Executor fallback
+    if (not ok or not triggered)
+        and prompt.Parent
+        and type(fireproximityprompt) == "function" then
+
+        pcall(function()
+            fireproximityprompt(prompt)
+        end)
+    end
+
+    local start = os.clock()
+    local detected = false
+
+    while Running and Alive
+        and os.clock() - start < PICKUP_TIMEOUT do
+
+        if triggered then
+            detected = true
+            break
+        end
+
+        if not prompt.Parent
+            or not prompt:IsDescendantOf(Workspace)
+            or not prompt.Enabled then
+
+            detected = true
+            break
+        end
+
+        task.wait(0.10)
+    end
+
+    connection:Disconnect()
+
+    return detected
+end
+
+--========================================
+-- DELIVERY
+--========================================
+
+local function DeliverCandy(target)
+    local distance = (
+        target.Position - SEND_POSITION
+    ).Magnitude
+
+    DistanceText.Text = string.format(
+        "Delivery distance: %.0f studs",
         distance
     )
 
-    local waitTime = SEND_WAIT
+    local waitTime = DELIVERY_WAIT
 
     if distance <= NEAR_DISTANCE then
         waitTime = 0
-        SetStatus("Near delivery - sending")
+        SetStatus("Near - sending")
     else
         SetStatus("Waiting 8 seconds")
     end
 
-    if not WaitWhileRunning(waitTime) then
+    if not WaitActive(waitTime) then
         return false
     end
 
-    SetStatus("Teleporting to delivery")
+    SetStatus("Going to delivery")
 
-    if not TeleportTo(SEND_POINT) then
+    if not Teleport(SEND_POSITION) then
         return false
     end
 
-    -- Allow the game to process delivery
-    if not WaitWhileRunning(0.8) then
+    if not WaitActive(1) then
         return false
     end
 
-    SentCount += 1
+    DeliveryAttempts += 1
 
-    CountLabel.Text =
-        "Delivery attempts: " .. SentCount
+    CountText.Text =
+        "Delivery attempts: " .. DeliveryAttempts
 
     print(
-        "[CANDY] Delivery attempted:",
+        "[CANDY V16] Delivery attempted",
         target.Rarity,
-        "Distance:",
         math.floor(distance)
     )
 
@@ -569,71 +552,53 @@ local function DeliverCandy(target)
 end
 
 --========================================
--- COLLECTION LOOP
+-- COLLECT LOOP
 --========================================
 
 local function CollectCycle()
-    local folder = GetCandyFolder()
+    local root = GetRoot()
 
-    if not folder then
-        SetStatus("Waiting for HalloweenCandy")
-        task.wait(1)
+    if not root then
+        SetStatus("Waiting for character")
+        task.wait(0.5)
         return
     end
 
-    SetStatus("Scanning candies")
+    local target, count = FindBestCandy()
 
-    local target = ScanCandies()
+    ScanText.Text =
+        "Candy found: " .. count
 
     if not target then
-        TargetLabel.Text = "Target: None"
+        TargetText.Text = "Target: None"
         SetStatus("Waiting for candy")
         task.wait(SCAN_WAIT)
         return
     end
 
-    TargetLabel.Text =
+    TargetText.Text =
         "Target: " .. target.Rarity
 
-    print(
-        "[CANDY] Selected rarity:",
-        target.Rarity
-    )
+    SetStatus("Collecting " .. target.Rarity)
 
-    local success = false
+    local picked = PickupCandy(target)
 
-    for attempt = 1, MAX_RETRIES do
-        if not Alive or not Running then
-            return
-        end
-
-        success = TryPickup(target, folder)
-
-        if success then break end
-
-        print(
-            "[CANDY] Pickup attempt failed:",
-            attempt
-        )
-
-        task.wait(0.15)
+    if not Running or not Alive then
+        return
     end
 
-    if not success then
+    if not picked then
         FailedUntil[target.Prompt] =
-            os.clock() + 4
+            os.clock() + 3
 
-        SetStatus("Pickup not confirmed")
+        SetStatus("Pickup not detected")
         task.wait(SCAN_WAIT)
         return
     end
 
-    SetStatus("Candy pickup detected")
-
-    print(
-        "[CANDY] Pickup detected:",
-        target.Rarity
-    )
+    -- Triggering a prompt does not prove
+    -- the server accepted the pickup.
+    SetStatus("Pickup signal detected")
 
     DeliverCandy(target)
 
@@ -641,7 +606,25 @@ local function CollectCycle()
 end
 
 --========================================
--- START / STOP
+-- ANTI IDLE
+--========================================
+
+table.insert(
+    Connections,
+    Player.Idled:Connect(function()
+        if not Alive then return end
+
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(
+                Vector2.new(0, 0)
+            )
+        end)
+    end)
+)
+
+--========================================
+-- BUTTONS
 --========================================
 
 StartButton.MouseButton1Click:Connect(function()
@@ -650,19 +633,19 @@ StartButton.MouseButton1Click:Connect(function()
     if Running then
         StartButton.Text = "STOP COLLECT"
         StartButton.BackgroundColor3 =
-            Color3.fromRGB(200, 65, 60)
+            Color3.fromRGB(195, 55, 55)
 
-        SetStatus("Starting collection")
+        SetStatus("Scanning")
     else
         StartButton.Text = "START COLLECT"
         StartButton.BackgroundColor3 =
-            Color3.fromRGB(30, 180, 85)
+            Color3.fromRGB(35, 180, 85)
 
         SetStatus("Stopped")
     end
 end)
 
-ENV.CandyV15Stop = function()
+ENV.CandyV16Stop = function()
     Alive = false
     Running = false
 
@@ -672,22 +655,22 @@ ENV.CandyV15Stop = function()
         end)
     end
 
-    if Gui then
-        Gui:Destroy()
-    end
+    Gui:Destroy()
 end
 
 CloseButton.MouseButton1Click:Connect(function()
-    ENV.CandyV15Stop()
+    ENV.CandyV16Stop()
 end)
 
 --========================================
--- DRAG UI
+-- DRAGGABLE UI
 --========================================
 
-local Dragging = false
-local DragStart
-local StartPosition
+local dragging = false
+local dragStart
+local startPosition
+
+Title.Active = true
 
 Title.InputBegan:Connect(function(input)
     if input.UserInputType ==
@@ -695,55 +678,58 @@ Title.InputBegan:Connect(function(input)
         or input.UserInputType ==
         Enum.UserInputType.Touch then
 
-        Dragging = true
-        DragStart = input.Position
-        StartPosition = Main.Position
+        dragging = true
+        dragStart = input.Position
+        startPosition = Main.Position
 
         input.Changed:Connect(function()
             if input.UserInputState ==
                 Enum.UserInputState.End then
-
-                Dragging = false
+                dragging = false
             end
         end)
     end
 end)
 
-local DragConnection = UIS.InputChanged:Connect(
-    function(input)
-        if not Dragging then return end
+table.insert(
+    Connections,
+    UIS.InputChanged:Connect(function(input)
+        if not dragging then return end
 
         if input.UserInputType ==
             Enum.UserInputType.MouseMovement
             or input.UserInputType ==
             Enum.UserInputType.Touch then
 
-            local delta =
-                input.Position - DragStart
+            local delta = input.Position - dragStart
 
             Main.Position = UDim2.new(
-                StartPosition.X.Scale,
-                StartPosition.X.Offset + delta.X,
-                StartPosition.Y.Scale,
-                StartPosition.Y.Offset + delta.Y
+                startPosition.X.Scale,
+                startPosition.X.Offset + delta.X,
+                startPosition.Y.Scale,
+                startPosition.Y.Offset + delta.Y
             )
         end
-    end
+    end)
 )
 
-table.insert(Connections, DragConnection)
+--========================================
+-- STARTUP
+--========================================
 
---========================================
--- MAIN WORKER
---========================================
+SetStatus("Indexing candy prompts")
 
 task.spawn(function()
+    InitialScan()
+
+    print("[V16] Initial scan complete")
+
     while Alive do
         if Running then
             local ok, err = pcall(CollectCycle)
 
             if not ok then
-                warn("[CANDY V15 ERROR]", err)
+                warn("[V16 ERROR]", err)
                 SetStatus("Error - retrying")
                 task.wait(0.5)
             end
@@ -753,10 +739,10 @@ task.spawn(function()
     end
 end)
 
-print("================================")
-print("CANDY COLLECTOR V15 LOADED")
-print("Scan delay:", SCAN_WAIT)
-print("Delivery wait:", SEND_WAIT)
+print("==============================")
+print("CANDY COLLECTOR V16 LOADED")
+print("Scan:", SCAN_WAIT)
+print("Delivery wait:", DELIVERY_WAIT)
 print("Near distance:", NEAR_DISTANCE)
-print("Anti-Idle: Enabled")
-print("================================")
+print("Anti-Idle: ON")
+print("==============================")
