@@ -1,37 +1,106 @@
 local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+
 local LocalPlayer = Players.LocalPlayer
 
-local MULTIPLIER = 5
-local TRANSPARENCY = 0.6
+-- SETTINGS
+local BOSS_NAME = "Housewife Mosquito"
+local HITBOX_MULTIPLIER = 5
+local DISTANCE = 3
 
-local function ExpandHitbox(player)
-    if player == LocalPlayer then return end
+local function FindBoss()
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Model")
+            and string.find(
+                string.lower(obj.Name),
+                string.lower(BOSS_NAME),
+                1,
+                true
+            ) then
 
-    local function Apply(character)
-        local root = character:WaitForChild("HumanoidRootPart", 10)
-        if not root then return end
+            local root =
+                obj:FindFirstChild("HumanoidRootPart", true)
+                or obj.PrimaryPart
+                or obj:FindFirstChildWhichIsA("BasePart", true)
 
-        local originalSize = root.Size
-
-        root.Size = Vector3.new(
-            originalSize.X * MULTIPLIER,
-            originalSize.Y,
-            originalSize.Z * MULTIPLIER
-        )
-
-        root.Transparency = TRANSPARENCY
-        root.CanCollide = false
+            if root then
+                return obj, root
+            end
+        end
     end
 
-    player.CharacterAdded:Connect(Apply)
+    return nil, nil
+end
 
-    if player.Character then
-        Apply(player.Character)
+local OriginalSizes = {}
+
+local function ExpandBoss()
+    local boss, root = FindBoss()
+
+    if not boss then
+        warn("Boss not found!")
+        return
     end
+
+    if not OriginalSizes[root] then
+        OriginalSizes[root] = root.Size
+    end
+
+    local original = OriginalSizes[root]
+
+    root.Size = Vector3.new(
+        original.X * HITBOX_MULTIPLIER,
+        original.Y,
+        original.Z * HITBOX_MULTIPLIER
+    )
+
+    root.CanCollide = false
+    root.Transparency = 0.6
+
+    print("Boss Hitbox Expanded!")
 end
 
-for _, player in ipairs(Players:GetPlayers()) do
-    ExpandHitbox(player)
+local function MoveNearBoss()
+    local character = LocalPlayer.Character
+    if not character then return end
+
+    local playerRoot =
+        character:FindFirstChild("HumanoidRootPart")
+
+    local boss, bossRoot = FindBoss()
+
+    if not playerRoot or not bossRoot then
+        warn("Boss or player not found!")
+        return
+    end
+
+    local direction = Vector3.new(
+        playerRoot.Position.X - bossRoot.Position.X,
+        0,
+        playerRoot.Position.Z - bossRoot.Position.Z
+    )
+
+    if direction.Magnitude < 0.01 then
+        direction = Vector3.new(1, 0, 0)
+    end
+
+    local position =
+        bossRoot.Position
+        + direction.Unit * DISTANCE
+        + Vector3.new(0, -1, 0)
+
+    playerRoot.CFrame =
+        CFrame.lookAt(position, bossRoot.Position)
 end
 
-Players.PlayerAdded:Connect(ExpandHitbox)
+-- Expand hitbox
+ExpandBoss()
+
+-- Press V to move near boss
+UIS.InputBegan:Connect(function(input, processed)
+    if processed then return end
+
+    if input.KeyCode == Enum.KeyCode.V then
+        MoveNearBoss()
+    end
+end)
