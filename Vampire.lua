@@ -1,4 +1,4 @@
--- Hunter Auto Farm | Roblox Lua / client-side
+-- Hunter Auto Farm v2 | Roblox Lua / client-side
 -- Target: workspace.NPCS.HUNTERS -> Model named "Hunter"
 -- NOTE: Only confirms skill E animation if the real E AnimationId is provided.
 
@@ -6,6 +6,8 @@ local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local VirtualUser = game:GetService("VirtualUser")
 local HttpService = game:GetService("HttpService")
 
 local player = Players.LocalPlayer
@@ -26,9 +28,12 @@ local RANGES = {
 local settings = {
     enabled = false,
     rangeIndex = 1,
-    tweenSpeed = 35,    -- studs / second
-    underOffset = 5,    -- studs beneath the Hunter root
-    eAnimationId = ""  -- enter the real animation ID to VERIFY E
+    tweenSpeed = 100,  -- adjustable 10..500 studs/second
+    underOffset = 5,   -- studs beneath the Hunter root
+    mode = "tween",    -- tween or stationary (no movement)
+    antiKnockback = true, -- reduce locally simulated fling; NOT server immunity
+    antiIdle = true,   -- attempt to prevent the standard idle disconnect
+    eAnimationId = "" -- exact AnimationId is needed to VERIFY E
 }
 
 local canSave = type(writefile) == "function" and type(readfile) == "function"
@@ -42,10 +47,19 @@ if canSave then
             settings.rangeIndex = math.clamp(math.floor(loaded.rangeIndex), 1, #RANGES)
         end
         if type(loaded.tweenSpeed) == "number" then
-            settings.tweenSpeed = math.clamp(loaded.tweenSpeed, 10, 150)
+            settings.tweenSpeed = math.clamp(math.floor(loaded.tweenSpeed), 10, 500)
         end
         if type(loaded.underOffset) == "number" then
             settings.underOffset = math.clamp(loaded.underOffset, 2, 12)
+        end
+        if loaded.mode == "tween" or loaded.mode == "stationary" then
+            settings.mode = loaded.mode
+        end
+        if type(loaded.antiKnockback) == "boolean" then
+            settings.antiKnockback = loaded.antiKnockback
+        end
+        if type(loaded.antiIdle) == "boolean" then
+            settings.antiIdle = loaded.antiIdle
         end
         if type(loaded.eAnimationId) == "string" then
             settings.eAnimationId = loaded.eAnimationId:match("(%d+)") or ""
@@ -352,8 +366,8 @@ local gui = makeGui("ScreenGui", {
 state.gui = gui
 
 local panel = makeGui("Frame", {
-    Size = UDim2.fromOffset(310, 294),
-    Position = UDim2.fromOffset(20, 120),
+    Size = UDim2.fromOffset(338, 449),
+    Position = UDim2.fromOffset(20, 90),
     BackgroundColor3 = Color3.fromRGB(29, 32, 42),
     BorderSizePixel = 0
 }, gui)
@@ -361,43 +375,82 @@ makeGui("UICorner", { CornerRadius = UDim.new(0, 9) }, panel)
 
 local heading = makeGui("TextLabel", {
     Text = "HUNTER AUTO FARM", TextSize = 17, Font = Enum.Font.GothamBold,
-    TextColor3 = Color3.fromRGB(240, 243, 250),
-    BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 7),
-    Size = UDim2.fromOffset(245, 36), TextXAlignment = Enum.TextXAlignment.Left
+    TextColor3 = Color3.fromRGB(240, 243, 250), BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(12, 8), Size = UDim2.fromOffset(285, 32),
+    TextXAlignment = Enum.TextXAlignment.Left
 }, panel)
 
 local closeButton = makeGui("TextButton", {
     Text = "X", TextSize = 16, Font = Enum.Font.GothamBold,
     BackgroundColor3 = Color3.fromRGB(95, 40, 49),
     TextColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
-    Position = UDim2.fromOffset(272, 9), Size = UDim2.fromOffset(26, 28)
+    Position = UDim2.fromOffset(300, 9), Size = UDim2.fromOffset(26, 28)
 }, panel)
 makeGui("UICorner", { CornerRadius = UDim.new(0, 5) }, closeButton)
 
-local rangeButton = makeGui("TextButton", {
-    Text = "", TextSize = 15, Font = Enum.Font.GothamSemibold,
-    BackgroundColor3 = Color3.fromRGB(51, 60, 79),
-    TextColor3 = Color3.fromRGB(245, 245, 245), BorderSizePixel = 0,
-    Position = UDim2.fromOffset(12, 52), Size = UDim2.fromOffset(286, 39)
-}, panel)
-makeGui("UICorner", { CornerRadius = UDim.new(0, 6) }, rangeButton)
+local function uiButton(y, height)
+    local button = makeGui("TextButton", {
+        Text = "", TextSize = 14, Font = Enum.Font.GothamSemibold,
+        BackgroundColor3 = Color3.fromRGB(51, 60, 79),
+        TextColor3 = Color3.fromRGB(245, 245, 245), BorderSizePixel = 0,
+        Position = UDim2.fromOffset(12, y), Size = UDim2.fromOffset(314, height)
+    }, panel)
+    makeGui("UICorner", { CornerRadius = UDim.new(0, 6) }, button)
+    return button
+end
 
-local farmButton = makeGui("TextButton", {
-    Text = "", TextSize = 15, Font = Enum.Font.GothamBold,
-    TextColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
-    Position = UDim2.fromOffset(12, 99), Size = UDim2.fromOffset(286, 39)
+local rangeButton = uiButton(48, 37)
+local farmButton = uiButton(92, 37)
+local modeButton = uiButton(136, 35)
+
+local speedLabel = makeGui("TextLabel", {
+    Text = "ความเร็ว Tween (10 - 500)", TextSize = 13, Font = Enum.Font.Gotham,
+    TextColor3 = Color3.fromRGB(225, 231, 242), BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(12, 178), Size = UDim2.fromOffset(226, 28),
+    TextXAlignment = Enum.TextXAlignment.Left
 }, panel)
-makeGui("UICorner", { CornerRadius = UDim.new(0, 6) }, farmButton)
+
+local speedBox = makeGui("TextBox", {
+    Text = tostring(settings.tweenSpeed), ClearTextOnFocus = false,
+    TextSize = 14, Font = Enum.Font.GothamSemibold,
+    TextColor3 = Color3.fromRGB(255, 255, 255),
+    BackgroundColor3 = Color3.fromRGB(51, 60, 79),
+    BorderSizePixel = 0,
+    Position = UDim2.fromOffset(249, 179), Size = UDim2.fromOffset(77, 27)
+}, panel)
+makeGui("UICorner", { CornerRadius = UDim.new(0, 5) }, speedBox)
+
+local speedTrack = makeGui("Frame", {
+    Name = "SpeedTrack", Size = UDim2.fromOffset(310, 8),
+    Position = UDim2.fromOffset(14, 218), BorderSizePixel = 0,
+    BackgroundColor3 = Color3.fromRGB(76, 84, 102)
+}, panel)
+makeGui("UICorner", { CornerRadius = UDim.new(1, 0) }, speedTrack)
+local speedFill = makeGui("Frame", {
+    Name = "SpeedFill", Size = UDim2.fromScale(0, 1),
+    BorderSizePixel = 0, BackgroundColor3 = Color3.fromRGB(65, 163, 242)
+}, speedTrack)
+makeGui("UICorner", { CornerRadius = UDim.new(1, 0) }, speedFill)
+local speedThumb = makeGui("Frame", {
+    Name = "Thumb", Size = UDim2.fromOffset(16, 16),
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0, 0.5), BorderSizePixel = 0,
+    BackgroundColor3 = Color3.fromRGB(230, 239, 248)
+}, speedTrack)
+makeGui("UICorner", { CornerRadius = UDim.new(1, 0) }, speedThumb)
+
+local antiKnockbackButton = uiButton(244, 35)
+local antiIdleButton = uiButton(286, 35)
 
 local animBox = makeGui("TextBox", {
     Text = settings.eAnimationId,
-    PlaceholderText = "AnimationId ของปุ่ม E (ใช้ยืนยัน)",
+    PlaceholderText = "AnimationId สกิล E (เพื่อยืนยันว่าเล่นจริง)",
     ClearTextOnFocus = false, TextSize = 13,
     Font = Enum.Font.Gotham, TextColor3 = Color3.fromRGB(255, 255, 255),
     PlaceholderColor3 = Color3.fromRGB(165, 169, 177),
     BackgroundColor3 = Color3.fromRGB(51, 60, 79),
-    BorderSizePixel = 0, Position = UDim2.fromOffset(12, 146),
-    Size = UDim2.fromOffset(286, 35)
+    BorderSizePixel = 0, Position = UDim2.fromOffset(12, 332),
+    Size = UDim2.fromOffset(314, 34)
 }, panel)
 makeGui("UICorner", { CornerRadius = UDim.new(0, 6) }, animBox)
 
@@ -406,18 +459,36 @@ local statusLabel = makeGui("TextLabel", {
     TextColor3 = Color3.fromRGB(220, 225, 238),
     TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true,
-    BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 190),
-    Size = UDim2.fromOffset(286, 94)
+    BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 378),
+    Size = UDim2.fromOffset(314, 62)
 }, panel)
 
 local function repaint()
+    if not state.alive then return end
     local range = RANGES[settings.rangeIndex]
-    rangeButton.Text = ("ช่วงเลเวล Hunter: %d - %d  (คลิกเปลี่ยน)"):format(range.min, range.max)
+    rangeButton.Text = ("Hunter Level: %d - %d  (คลิกเปลี่ยน)"):format(range.min, range.max)
     farmButton.Text = settings.enabled and "AUTO FARM: ON" or "AUTO FARM: OFF"
     farmButton.BackgroundColor3 = settings.enabled
         and Color3.fromRGB(38, 132, 86) or Color3.fromRGB(143, 56, 62)
-    statusLabel.Text = ("%s\n%s\nเซฟตั้งค่า: %s | Tween %d studs/s"):
-        format(state.info, state.eInfo, canSave and "รองรับ" or "ไม่รองรับ", settings.tweenSpeed)
+    modeButton.Text = settings.mode == "tween"
+        and "โหมด: Tween ไปใต้ Hunter" or "โหมด: อยู่กับที่ + กดหมัดอัตโนมัติ"
+    antiKnockbackButton.Text = "ลดแรงกระเด็น: " .. (settings.antiKnockback and "ON" or "OFF")
+    antiIdleButton.Text = "กัน AFK: " .. (settings.antiIdle and "ON" or "OFF")
+    local ratio = (settings.tweenSpeed - 10) / 490
+    speedFill.Size = UDim2.fromScale(ratio, 1)
+    speedThumb.Position = UDim2.fromScale(ratio, 0.5)
+    if not speedBox:IsFocused() then speedBox.Text = tostring(settings.tweenSpeed) end
+    statusLabel.Text = ("%s\n%s\nตั้งค่า: %s | %d studs/s"):
+        format(state.info, state.eInfo, canSave and "บันทึกได้" or "ไม่รองรับ", settings.tweenSpeed)
+end
+
+local function setTweenSpeed(value, save)
+    local number = tonumber(value)
+    if not number or number ~= number then return end
+    settings.tweenSpeed = math.clamp(math.floor(number + 0.5), 10, 500)
+    cancelTween() -- reroute at the new speed on the next farm tick
+    if save then saveSettings() end
+    repaint()
 end
 
 rangeButton.MouseButton1Click:Connect(function()
@@ -431,16 +502,71 @@ farmButton.MouseButton1Click:Connect(function()
     if not alone() then kickSelf() return end
     settings.enabled = not settings.enabled
     if settings.enabled then
-        state.lastE = -math.huge -- First E use upon reaching a Hunter.
+        state.lastE = -math.huge
         state.info = "เริ่มค้นหา Hunter..."
     else
         state.info = "หยุด Auto Farm"
-        state.eBusy = false
         changeTarget(nil)
     end
     saveSettings()
     repaint()
 end)
+
+modeButton.MouseButton1Click:Connect(function()
+    settings.mode = settings.mode == "tween" and "stationary" or "tween"
+    cancelTween()
+    saveSettings()
+    repaint()
+end)
+
+antiKnockbackButton.MouseButton1Click:Connect(function()
+    settings.antiKnockback = not settings.antiKnockback
+    saveSettings()
+    repaint()
+end)
+
+antiIdleButton.MouseButton1Click:Connect(function()
+    settings.antiIdle = not settings.antiIdle
+    saveSettings()
+    repaint()
+end)
+
+speedBox.FocusLost:Connect(function()
+    setTweenSpeed(speedBox.Text, true)
+    speedBox.Text = tostring(settings.tweenSpeed)
+end)
+
+local draggingSpeed = false
+local function speedFromX(x, save)
+    if speedTrack.AbsoluteSize.X <= 0 then return end
+    local ratio = math.clamp((x - speedTrack.AbsolutePosition.X) / speedTrack.AbsoluteSize.X, 0, 1)
+    setTweenSpeed(10 + ratio * 490, save)
+end
+
+local function speedBegin(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        draggingSpeed = true
+        speedFromX(input.Position.X, false)
+    end
+end
+
+table.insert(state.connections, speedTrack.InputBegan:Connect(speedBegin))
+table.insert(state.connections, speedThumb.InputBegan:Connect(speedBegin))
+table.insert(state.connections, UserInputService.InputChanged:Connect(function(input)
+    if draggingSpeed and (input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch) then
+        speedFromX(input.Position.X, false)
+    end
+end))
+table.insert(state.connections, UserInputService.InputEnded:Connect(function(input)
+    if draggingSpeed and (input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch) then
+        draggingSpeed = false
+        saveSettings()
+        repaint()
+    end
+end))
 
 animBox.FocusLost:Connect(function()
     settings.eAnimationId = animBox.Text:match("(%d+)") or ""
@@ -452,11 +578,9 @@ animBox.FocusLost:Connect(function()
     repaint()
 end)
 
-closeButton.MouseButton1Click:Connect(function()
-    close()
-end)
+closeButton.MouseButton1Click:Connect(close)
 
--- Drag the GUI by its title bar.
+-- GUI drag from title bar only.
 do
     local dragging, startMouse, startPanel
     table.insert(state.connections, heading.InputBegan:Connect(function(input)
@@ -482,6 +606,32 @@ do
     end))
 end
 
+-- This reduces local physics knockback, not server-authoritative knockback or anti-cheat kicks.
+table.insert(state.connections, RunService.Heartbeat:Connect(function()
+    if not state.alive or not settings.enabled or not settings.antiKnockback then return end
+    local root = characterRoot()
+    if not root then return end
+    local vel = root.AssemblyLinearVelocity
+    local angular = root.AssemblyAngularVelocity
+    if vel.Magnitude > 75 then
+        root.AssemblyLinearVelocity = Vector3.zero
+    end
+    if angular.Magnitude > 15 then
+        root.AssemblyAngularVelocity = Vector3.zero
+    end
+end))
+
+-- Prevent the standard Roblox idle timeout where supported; cannot override server kicks.
+table.insert(state.connections, player.Idled:Connect(function()
+    if not state.alive or not settings.antiIdle then return end
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+        task.wait(0.12)
+        VirtualUser:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+    end)
+end))
+
 repaint()
 
 task.spawn(function()
@@ -504,6 +654,24 @@ task.spawn(function()
             continue
         end
 
+        -- Stationary mode has no movement and doesn't require NPC level data.
+        -- It only simulates M1/E; the game still decides attack range and damage.
+        if settings.mode == "stationary" then
+            changeTarget(nil)
+            state.info = "ยืนต่อยอัตโนมัติ (โดนเฉพาะศัตรูในระยะจริง)"
+            if not state.eBusy and os.clock() - state.lastClick >= 0.22 then
+                state.lastClick = os.clock()
+                attackM1()
+            end
+            if not state.eBusy and os.clock() - state.lastE >= 30 then
+                state.lastE = os.clock()
+                state.eBusy = true
+                task.spawn(useEAndCheck)
+            end
+            repaint()
+            continue
+        end
+
         if not validTarget(state.target) then
             local target, reason = closestHunter(root)
             changeTarget(target)
@@ -521,9 +689,7 @@ task.spawn(function()
         end
 
         local reached = moveBelow(root, npcRoot)
-        if not reached then
-            state.info = "Tween ไปใต้ Hunter เลเวล " .. tostring(hunterLevel(state.target))
-        else
+        if reached then
             state.info = "กำลังต่อย Hunter เลเวล " .. tostring(hunterLevel(state.target))
             if not state.eBusy and os.clock() - state.lastClick >= 0.22 then
                 state.lastClick = os.clock()
@@ -534,6 +700,8 @@ task.spawn(function()
                 state.eBusy = true
                 task.spawn(useEAndCheck)
             end
+        else
+            state.info = "Tween ไปใต้ Hunter เลเวล " .. tostring(hunterLevel(state.target))
         end
         repaint()
     end
