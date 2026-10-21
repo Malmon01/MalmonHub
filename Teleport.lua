@@ -10,7 +10,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 local CONFIG = {
     FolderName = "f2db5001-262",
     WarpHeight = 4,     -- studs above each target
-    WarpDelay = 1.0,    -- seconds between targets
+    WarpDelay = 10.0,    -- seconds between targets
     RoundDelay = 2.0,   -- seconds after finishing a whole folder
     Repeat = true,     -- true = repeat forever while ON
 }
