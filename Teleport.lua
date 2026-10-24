@@ -1,255 +1,175 @@
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
+local me = Players.LocalPlayer
 
-local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
-
-local YELLOW = Color3.fromRGB(255, 220, 40)
-local GREEN = Color3.fromRGB(50, 255, 80)
-local GUI_NAME = "_ComputerTravelMenu"
-
--- Clean up the previous copy of this add-on.
-local old = playerGui:FindFirstChild(GUI_NAME)
-if old then old:Destroy() end
-
-local gui = Instance.new("ScreenGui")
-gui.Name = GUI_NAME
-gui.ResetOnSpawn = false
-gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-gui.Parent = playerGui
+local KEY = "_PlayerRoleHighlightVersion"
+local version = (me:GetAttribute(KEY) or 0) + 1
+me:SetAttribute(KEY, version)
 
 local connections = {}
-local computers = {}
-local alive = true
-local queued = false
-local nextId = 0
+local states = {}
+local active = true
 
-local function listen(signal, callback, bucket)
-	local connection = signal:Connect(callback)
-	table.insert(bucket or connections, connection)
-	return connection
+local function connect(signal, callback, bucket)
+	local c = signal:Connect(callback)
+	table.insert(bucket or connections, c)
 end
 
 local function disconnect(bucket)
-	for _, connection in ipairs(bucket) do
-		connection:Disconnect()
+	for _, c in ipairs(bucket) do
+		c:Disconnect()
+	end
+	table.clear(bucket)
+end
+
+local function clearCharacter(state)
+	disconnect(state.characterConnections)
+	if state.highlight then
+		state.highlight:Destroy()
+		state.highlight = nil
 	end
 end
 
-local function hasClearWall(computer)
-	for _, object in ipairs(computer:GetDescendants()) do
-		if object.Name:lower() == "clearwall" then
-			return true
-		end
-	end
-	return false
-end
-
-local toggle = Instance.new("TextButton")
-toggle.Size = UDim2.fromOffset(220, 36)
-toggle.Position = UDim2.new(1, -235, 0, 80)
-toggle.BackgroundColor3 = Color3.fromRGB(35, 38, 45)
-toggle.TextColor3 = Color3.new(1, 1, 1)
-toggle.Font = Enum.Font.GothamBold
-toggle.TextSize = 14
-toggle.Text = "COMPUTERS — Hide"
-toggle.Parent = gui
-
-local panel = Instance.new("ScrollingFrame")
-panel.Position = UDim2.new(1, -235, 0, 120)
-panel.Size = UDim2.fromOffset(220, 230)
-panel.BackgroundColor3 = Color3.fromRGB(25, 28, 34)
-panel.BorderSizePixel = 0
-panel.ScrollBarThickness = 5
-panel.AutomaticCanvasSize = Enum.AutomaticSize.Y
-panel.CanvasSize = UDim2.new()
-panel.Parent = gui
-
-local layout = Instance.new("UIListLayout")
-layout.Padding = UDim.new(0, 6)
-layout.SortOrder = Enum.SortOrder.LayoutOrder
-layout.Parent = panel
-
-local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -8, 0, 34)
-status.BackgroundTransparency = 1
-status.TextColor3 = Color3.new(1, 1, 1)
-status.TextSize = 13
-status.Font = Enum.Font.Gotham
-status.LayoutOrder = -1
-status.Parent = panel
-
-listen(toggle.Activated, function()
-	panel.Visible = not panel.Visible
-	toggle.Text = panel.Visible
-		and "COMPUTERS — Hide"
-		or "COMPUTERS — Show"
-end)
-
-local function teleportTo(computer)
-	if not computer:IsDescendantOf(Workspace)
-		or hasClearWall(computer) then
-		status.Text = "Computer no longer available"
-		return
-	end
+local function update(player)
+	local state = states[player]
+	if not active or not state then return end
 
 	local character = player.Character
-	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-	local root = character and character:FindFirstChild("HumanoidRootPart")
-
-	if not root or not humanoid or humanoid.Health <= 0 then
-		status.Text = "Character not ready"
+	if not character or not character:IsDescendantOf(Workspace) then
 		return
 	end
 
-	local trigger = computer:FindFirstChild("ComputerTrigger1", true)
-	local base = computer:FindFirstChild("BasePart", true)
-	local anchor = trigger or base
+	local stats = player:FindFirstChild("TempPlayerStatsModule")
+	local flag = stats and stats:FindFirstChild("IsBeast")
+	local beast = flag and flag:IsA("BoolValue") and flag.Value
+	local color = beast
+		and Color3.fromRGB(255, 50, 50)
+		or Color3.fromRGB(50, 180, 255)
 
-	if not anchor or not anchor:IsA("BasePart") then
-		status.Text = "Teleport position not found"
-		return
+	local h = state.highlight
+	if not h or h.Parent ~= character then
+		-- Reuse the highlight from the earlier scripts if present.
+		h = character:FindFirstChild("_PersistentRoleHighlight")
+			or character:FindFirstChild("_DiagnosticHighlight")
+			or character:FindFirstChild("_PlayerRoleHighlight")
+
+		if not h or not h:IsA("Highlight") then
+			h = Instance.new("Highlight")
+			h.Name = "_PlayerRoleHighlight"
+			h.Parent = character
+		end
+
+		state.highlight = h
 	end
 
-	-- Place the character above the interaction area.
-	local position = anchor.Position + Vector3.new(
-		0, anchor.Size.Y / 2 + humanoid.HipHeight + root.Size.Y / 2 + 0.5, 0
-	)
-
-	local screen = computer:FindFirstChild("Screen", true)
-	local facing = screen and screen:IsA("BasePart")
-		and screen.Position or computer:GetPivot().Position
-
-	local lookAt = Vector3.new(facing.X, position.Y, facing.Z)
-	local destination = CFrame.new(position)
-
-	if (lookAt - position).Magnitude > 0.1 then
-		destination = CFrame.lookAt(position, lookAt)
-	end
-
-	-- Preserve the model pivot's offset from HumanoidRootPart.
-	local offset = root.CFrame:ToObjectSpace(character:GetPivot())
-	character:PivotTo(destination * offset)
-
-	root.AssemblyLinearVelocity = Vector3.zero
-	root.AssemblyAngularVelocity = Vector3.zero
-	status.Text = "Teleport requested"
+	h.Adornee = character
+	h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	h.FillTransparency = 0.5
+	h.OutlineTransparency = 0
+	h.FillColor = color
+	h.OutlineColor = color
+	h.Enabled = true
 end
 
-local function refresh()
-	if not alive then return end
-	local pending = 0
+local function bindRole(player)
+	local state = states[player]
+	if not active or not state then return end
 
-	for computer, entry in pairs(computers) do
-		if computer:IsDescendantOf(Workspace) then
-			local cleared = hasClearWall(computer)
-			local color = cleared and GREEN or YELLOW
+	disconnect(state.roleConnections)
 
-			-- Reuse the existing highlight to avoid overlapping effects.
-			local h = computer:FindFirstChild("_PersistentRoleHighlight")
-				or computer:FindFirstChild("_DiagnosticHighlight")
-
-			if not h or not h:IsA("Highlight") then
-				h = computer:FindFirstChild("_ComputerStatusHighlight")
-				if not h then
-					h = Instance.new("Highlight")
-					h.Name = "_ComputerStatusHighlight"
-					h.Adornee = computer
-					h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-					h.FillTransparency = 0.5
-					h.OutlineTransparency = 0
-					h.Parent = computer
-					entry.ownedHighlight = h
-				end
+	local stats = player:FindFirstChild("TempPlayerStatsModule")
+	if stats then
+		local function changed(child)
+			if child.Name == "IsBeast" then
+				bindRole(player)
 			end
+		end
 
-			h.FillColor = color
-			h.OutlineColor = color
-			h.Enabled = true
-			entry.button.Visible = not cleared
+		connect(stats.ChildAdded, changed, state.roleConnections)
+		connect(stats.ChildRemoved, changed, state.roleConnections)
 
-			if not cleared then
-				pending = pending + 1
-			end
+		local flag = stats:FindFirstChild("IsBeast")
+		if flag and flag:IsA("BoolValue") then
+			connect(flag:GetPropertyChangedSignal("Value"), function()
+				update(player)
+			end, state.roleConnections)
 		end
 	end
 
-	status.Text = "Available computers: " .. pending
+	update(player)
 end
 
-local function scheduleRefresh()
-	if queued or not alive then return end
-	queued = true
-	task.defer(function()
-		queued = false
-		refresh()
-	end)
+local function bindCharacter(player, character)
+	local state = states[player]
+	if not active or not state then return end
+
+	clearCharacter(state)
+
+	connect(character.AncestryChanged, function()
+		update(player)
+	end, state.characterConnections)
+
+	update(player)
 end
 
-local function register(computer)
-	if computers[computer]
-		or computer.Name ~= "ComputerTable"
-		or not computer:IsA("Model") then
-		return
+local function removePlayer(player)
+	local state = states[player]
+	if not state then return end
+
+	disconnect(state.connections)
+	disconnect(state.roleConnections)
+	clearCharacter(state)
+	states[player] = nil
+end
+
+local function addPlayer(player)
+	if states[player] or not active then return end
+
+	local state = {
+		connections = {},
+		roleConnections = {},
+		characterConnections = {},
+	}
+	states[player] = state
+
+	connect(player.CharacterAdded, function(character)
+		bindCharacter(player, character)
+	end, state.connections)
+
+	connect(player.CharacterRemoving, function()
+		clearCharacter(state)
+	end, state.connections)
+
+	local function statsChanged(child)
+		if child.Name == "TempPlayerStatsModule" then
+			bindRole(player)
+		end
 	end
 
-	nextId = nextId + 1
+	connect(player.ChildAdded, statsChanged, state.connections)
+	connect(player.ChildRemoved, statsChanged, state.connections)
 
-	local button = Instance.new("TextButton")
-	button.Size = UDim2.new(1, -8, 0, 40)
-	button.BackgroundColor3 = Color3.fromRGB(75, 65, 25)
-	button.TextColor3 = YELLOW
-	button.Font = Enum.Font.GothamBold
-	button.TextSize = 14
-	button.Text = "Teleport → Computer " .. nextId
-	button.LayoutOrder = nextId
-	button.Parent = panel
-
-	local entry = { button = button, connections = {} }
-	computers[computer] = entry
-
-	listen(button.Activated, function()
-		teleportTo(computer)
-	end, entry.connections)
-
-	listen(computer.DescendantAdded, scheduleRefresh, entry.connections)
-	listen(computer.DescendantRemoving, scheduleRefresh, entry.connections)
-
-	scheduleRefresh()
+	if player.Character then
+		bindCharacter(player, player.Character)
+	end
+	bindRole(player)
 end
 
-listen(Workspace.DescendantAdded, register)
+connect(me:GetAttributeChangedSignal(KEY), function()
+	if me:GetAttribute(KEY) == version then return end
 
-listen(Workspace.DescendantRemoving, function(object)
-	local entry = computers[object]
-	if not entry then return end
-
-	disconnect(entry.connections)
-	entry.button:Destroy()
-	if entry.ownedHighlight then
-		entry.ownedHighlight:Destroy()
-	end
-	computers[object] = nil
-	scheduleRefresh()
-end)
-
-listen(gui.Destroying, function()
-	alive = false
+	active = false
 	disconnect(connections)
-
-	for _, entry in pairs(computers) do
-		disconnect(entry.connections)
-		if entry.ownedHighlight then
-			entry.ownedHighlight:Destroy()
-		end
+	for player in pairs(states) do
+		removePlayer(player)
 	end
-	table.clear(computers)
 end)
 
--- One initial scan; subsequent changes use events.
-for _, object in ipairs(Workspace:GetDescendants()) do
-	register(object)
+connect(Players.PlayerAdded, addPlayer)
+connect(Players.PlayerRemoving, removePlayer)
+
+for _, player in ipairs(Players:GetPlayers()) do
+	addPlayer(player)
 end
 
-scheduleRefresh()
-print("Computer menu ready: yellow = no ClearWall, green = ClearWall")
+print("Player highlights active: RED beast / BLUE survivors")
