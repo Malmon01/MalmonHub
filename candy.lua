@@ -11,7 +11,18 @@ local collectibleSpawner = Workspace:WaitForChild("CollectibleSpawner")
 local isRunning = false
 local collectedItems = {}
 
--- UI ปุ่มเปิด/ปิด
+-- กำหนดพิกัดจุดสำคัญ (Waypoints) ครอบคลุมทั่วแมพ เพื่อบังคับให้เกมโหลดพื้นที่
+-- (คุณสามารถปรับเปลี่ยนพิกัด Vector3 ตามความกว้างของแมพในเกมได้ครับ)
+local patrolPoints = {
+	Vector3.new(0, 50, 0),       -- จุดกลางแมพ
+	Vector3.new(500, 50, 500),   -- โซนขวาบน
+	Vector3.new(-500, 50, 500),  -- โซนซ้ายบน
+	Vector3.new(500, 50, -500),  -- โซนขวาล่าง
+	Vector3.new(-500, 50, -500), -- โซนซ้ายล่าง
+	Vector3.new(0, 50, 1000),    -- โซนเกาะหรือขอบแมพไกลๆ
+}
+
+-- สร้าง GUI ปุ่มเปิด/ปิด
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "CandyTeleportGui"
 screenGui.Parent = CoreGui
@@ -43,7 +54,6 @@ toggleButton.MouseButton1Click:Connect(function()
 	end
 end)
 
--- ฟังก์ชันดึง Part สำหรับวาร์ป
 local function getTargetPart(item)
 	if item:IsA("Model") then
 		return item.PrimaryPart or item:FindFirstChildWhichIsA("BasePart")
@@ -53,7 +63,7 @@ local function getTargetPart(item)
 	return nil
 end
 
--- ลูปหลักสำหรับเก็บ Candy ทั้งหมดในโฟลเดอร์
+-- ลูปหลักสำหรับฟาร์มทั่วแมพ
 task.spawn(function()
 	while true do
 		if isRunning then
@@ -62,12 +72,12 @@ task.spawn(function()
 				humanoidRootPart = character.HumanoidRootPart
 				
 				local foundAny = false
-				local allChildren = collectibleSpawner:GetChildren() -- ดึงไอเทมทั้งหมดในโฟลเดอร์ ณ ตอนนั้น[cite: 1]
+				local allChildren = collectibleSpawner:GetChildren()
 				
+				-- 1. วาร์ปเก็บไอเทมที่มองเห็นในรอบนี้ก่อน
 				for _, item in ipairs(allChildren) do
 					if not isRunning then break end
 					
-					-- เช็คชื่อวัตถุตามโครงสร้างภาพ[cite: 1]
 					if (string.find(item.Name, "SPOOK") or string.find(item.Name, "Spookfest")) and not collectedItems[item] then
 						local targetPart = getTargetPart(item)
 						
@@ -75,15 +85,34 @@ task.spawn(function()
 							collectedItems[item] = true
 							foundAny = true
 							
-							-- เทเลพอร์ตไปตำแหน่งวัตถุ
 							humanoidRootPart.CFrame = targetPart.CFrame + Vector3.new(0, 3, 0)
-							task.wait(0.3) -- รอรับไอเทมเล็กน้อย
+							task.wait(0.25)
 						end
 					end
 				end
 				
-				-- หากเก็บครบทุกชิ้นที่มองเห็น ณ ตอนนั้นแล้ว ให้รีเซ็ตประวัติเพื่อรอบันทึกชิ้นใหม่
+				-- 2. ถ้าหากเก็บในรัศมีนี้หมดแล้ว ให้ตัวละครวาร์ปสเกาท์ไปตามจุดพิกัดหลัก (Patrol Points) เพื่อบังคับโหลดแมพส่วนที่เหลือ
 				if not foundAny then
+					for _, point in ipairs(patrolPoints) do
+						if not isRunning then break end
+						humanoidRootPart.CFrame = CFrame.new(point)
+						task.wait(0.5) -- รอให้เกมโหลด Chunk / Object ในโซนนั้นๆ
+						
+						-- เช็คอีกรอบว่ามีไอเทมโผล่มาไหมหลังวาร์ปมาโซนนี้
+						local newCheck = collectibleSpawner:GetChildren()
+						for _, item in ipairs(newCheck) do
+							if (string.find(item.Name, "SPOOK") or string.find(item.Name, "Spookfest")) and not collectedItems[item] then
+								local targetPart = getTargetPart(item)
+								if targetPart then
+									collectedItems[item] = true
+									humanoidRootPart.CFrame = targetPart.CFrame + Vector3.new(0, 3, 0)
+									task.wait(0.25)
+								end
+							end
+						end
+					end
+					
+					-- ล้างประวัติเพื่อวนลูปสำรวจใหม่รอบถัดไป
 					table.clear(collectedItems)
 				end
 			end
