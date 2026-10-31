@@ -1,11 +1,13 @@
 -- Services
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
-local RunService = game:GetService("RunService")
-local VirtualUser = game:GetService("VirtualUser")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
+
+-- เข้าถึง Remote Event สำหรับ Swing
+local eventAction = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("EventAction")
 
 -- สร้าง ScreenGui และ UI
 local screenGui = Instance.new("ScreenGui")
@@ -24,22 +26,12 @@ toggleButton.TextSize = 16
 toggleButton.Font = Enum.Font.SourceSansBold
 toggleButton.Parent = screenGui
 
--- ทำมุมปุ่มให้โค้งมน
 local uiCorner = Instance.new("UICorner")
 uiCorner.CornerRadius = UDim.new(0, 8)
 uiCorner.Parent = toggleButton
 
 -- สถานะการทำงาน
 local isRunning = false
-
--- ฟังก์ชันจำลองการคลิกซ้าย
-local function simulateClick()
-	pcall(function()
-		VirtualUser:Button1Down(Vector2.new(0,0))
-		task.wait(0.05)
-		VirtualUser:Button1Up(Vector2.new(0,0))
-	end)
-end
 
 -- ฟังก์ชันหลักในการฟาร์ม Pumpkin
 local function startFarming()
@@ -48,7 +40,6 @@ local function startFarming()
 			local character = player.Character
 			local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
 			
-			-- เข้าถึงโฟลเดอร์ Workspace -> Event -> Pumpkins (อ้างอิงตามรูปภาพของคุณ)
 			local eventFolder = Workspace:FindFirstChild("Event")
 			local pumpkinsFolder = eventFolder and eventFolder:FindFirstChild("Pumpkins")
 			
@@ -59,7 +50,6 @@ local function startFarming()
 				for _, pumpkin in ipairs(pumpkins) do
 					if not isRunning then break end
 					
-					-- ตรวจสอบว่ามีส่วนที่เป็น BasePart หรือ Model ที่มี PrimaryPart/Pivot
 					local targetPart = nil
 					if pumpkin:IsA("BasePart") then
 						targetPart = pumpkin
@@ -69,21 +59,25 @@ local function startFarming()
 					
 					if targetPart then
 						foundTarget = true
-						-- เทเลพอร์ตไปใกล้ๆ ฟักทอง
+						-- เทเลพอร์ตไปหาฟักทองลูกนี้
 						humanoidRootPart.CFrame = targetPart.CFrame + Vector3.new(0, 3, 0)
 						
-						-- จำลองการคลิกซ้ายรัวๆ จนกว่าฟักทองจะหายไปหรือย้ายเป้าหมาย
-						local startTime = tick()
-						while isRunning and pumpkin.Parent and (tick() - startTime < 1.5) do
-							simulateClick()
-							task.wait(0.2)
+						-- วนลูปตีด้วย Remote Event "Swing" จนกว่าฟักทองลูกนี้จะถูกทำลาย (หายไปจาก Workspace)
+						while isRunning and pumpkin.Parent == pumpkinsFolder do
+							pcall(function()
+								eventAction:InvokeServer("Swing")
+							end)
+							task.wait(0.2) -- หน่วงเวลาการโจมตีไม่ให้ส่งถี่เกินไป
 						end
+						
+						-- รอสักนิดหลังฟักทองแตก ก่อนจะเปลี่ยนเป้าหมายไปลูกถัดไป
+						task.wait(0.1)
 					end
 				end
 				
-				-- ถ้าไม่มีฟักทองเหลืออยู่ ให้รอสักครู่แล้วลองใหม่
+				-- ถ้าไม่มีฟักทองเหลือในโฟลเดอร์ ให้รอสั้นๆ แล้วเช็คใหม่
 				if not foundTarget then
-					task.wait(1)
+					task.wait(0.5)
 				end
 			else
 				task.wait(1)
@@ -100,10 +94,10 @@ toggleButton.MouseButton1Click:Connect(function()
 	
 	if isRunning then
 		toggleButton.Text = "Farm Pumpkins: ON"
-		toggleButton.BackgroundColor3 = Color3.fromRGB(50, 200, 50) -- สีเขียว (เปิดอยู่)
+		toggleButton.BackgroundColor3 = Color3.fromRGB(50, 200, 50) -- สีเขียว
 		startFarming()
 	else
 		toggleButton.Text = "Farm Pumpkins: OFF"
-		toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50) -- สีแดง (ปิดอยู่)
+		toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50) -- สีแดง
 	end
 end)
