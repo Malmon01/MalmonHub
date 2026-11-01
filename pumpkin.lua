@@ -1,13 +1,13 @@
 -- Services
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 local RunService = game:GetService("RunService")
-local VirtualUser = game:GetService("VirtualUser")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
--- สร้าง ScreenGui และ UI
+-- สร้าง ScreenGui และ UI เปิด/ปิด
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "PumpkinFarmGui"
 screenGui.ResetOnSpawn = false
@@ -18,13 +18,12 @@ toggleButton.Name = "ToggleButton"
 toggleButton.Size = UDim2.new(0, 160, 0, 50)
 toggleButton.Position = UDim2.new(0.5, -80, 0.1, 0)
 toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50) -- สีแดง (ปิดอยู่)
-toggleButton.Text = "Farm Pumpkins: OFF"
+toggleButton.Text = "Local Farm: OFF"
 toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
 toggleButton.TextSize = 16
 toggleButton.Font = Enum.Font.SourceSansBold
 toggleButton.Parent = screenGui
 
--- ทำมุมปุ่มให้โค้งมน
 local uiCorner = Instance.new("UICorner")
 uiCorner.CornerRadius = UDim.new(0, 8)
 uiCorner.Parent = toggleButton
@@ -32,23 +31,25 @@ uiCorner.Parent = toggleButton
 -- สถานะการทำงาน
 local isRunning = false
 
--- ฟังก์ชันจำลองการคลิกซ้าย
-local function simulateClick()
+-- ฟังก์ชันจำลองการคลิกซ้ายสมจริงผ่าน VirtualInputManager
+local function simulateMouseClick()
 	pcall(function()
-		VirtualUser:Button1Down(Vector2.new(0,0))
+		local vim = VirtualInputManager
+		-- จำลองการกดคลิกซ้ายที่ตำแหน่งกลางจอ
+		local vimX, vimY = 400, 300
+		vim:SendMouseButtonEvent(vimX, vimY, 0, true, game, 0)  -- กดลง
 		task.wait(0.05)
-		VirtualUser:Button1Up(Vector2.new(0,0))
+		vim:SendMouseButtonEvent(vimX, vimY, 0, false, game, 0) -- ปล่อย
 	end)
 end
 
--- ฟังก์ชันหลักในการฟาร์ม Pumpkin
+-- ฟังก์ชันหลักในการฟาร์ม
 local function startFarming()
 	task.spawn(function()
 		while isRunning do
 			local character = player.Character
 			local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
 			
-			-- เข้าถึงโฟลเดอร์ Workspace -> Event -> Pumpkins (อ้างอิงตามรูปภาพของคุณ)
 			local eventFolder = Workspace:FindFirstChild("Event")
 			local pumpkinsFolder = eventFolder and eventFolder:FindFirstChild("Pumpkins")
 			
@@ -59,7 +60,6 @@ local function startFarming()
 				for _, pumpkin in ipairs(pumpkins) do
 					if not isRunning then break end
 					
-					-- ตรวจสอบว่ามีส่วนที่เป็น BasePart หรือ Model ที่มี PrimaryPart/Pivot
 					local targetPart = nil
 					if pumpkin:IsA("BasePart") then
 						targetPart = pumpkin
@@ -69,21 +69,25 @@ local function startFarming()
 					
 					if targetPart then
 						foundTarget = true
-						-- เทเลพอร์ตไปใกล้ๆ ฟักทอง
+						
+						-- 1. วาร์ปไปหาฟักทอง
 						humanoidRootPart.CFrame = targetPart.CFrame + Vector3.new(0, 3, 0)
 						
-						-- จำลองการคลิกซ้ายรัวๆ จนกว่าฟักทองจะหายไปหรือย้ายเป้าหมาย
-						local startTime = tick()
-						while isRunning and pumpkin.Parent and (tick() - startTime < 1.5) do
-							simulateClick()
-							task.wait(0.2)
+						-- 2. หันหน้ามองไปที่ฟักทองเพื่อให้ตัวละครหรือกล้องเล็งตรง
+						humanoidRootPart.CFrame = CFrame.new(humanoidRootPart.Position, targetPart.Position)
+						
+						-- 3. วนลูปจำลองคลิกซ้ายรัวๆ จนกว่าฟักทองลูกนี้จะถูกทำลาย (หายไปจากโฟลเดอร์)
+						while isRunning and pumpkin.Parent == pumpkinsFolder do
+							simulateMouseClick()
+							task.wait(0.25) -- หน่วงเวลาการคลิกไม่ให้ถี่จนเกินไป
 						end
+						
+						task.wait(0.1)
 					end
 				end
 				
-				-- ถ้าไม่มีฟักทองเหลืออยู่ ให้รอสักครู่แล้วลองใหม่
 				if not foundTarget then
-					task.wait(1)
+					task.wait(0.5) -- หากไม่มีฟักทองเหลือ ให้รอสักครู่แล้วเช็คใหม่
 				end
 			else
 				task.wait(1)
@@ -94,16 +98,16 @@ local function startFarming()
 	end)
 end
 
--- กดปุ่มเพื่อ เปิด/ปิด
+-- กดปุ่มเพื่อ เปิด/ปิด ระบบ
 toggleButton.MouseButton1Click:Connect(function()
 	isRunning = not isRunning
 	
 	if isRunning then
-		toggleButton.Text = "Farm Pumpkins: ON"
-		toggleButton.BackgroundColor3 = Color3.fromRGB(50, 200, 50) -- สีเขียว (เปิดอยู่)
+		toggleButton.Text = "Local Farm: ON"
+		toggleButton.BackgroundColor3 = Color3.fromRGB(50, 200, 50) -- สีเขียว
 		startFarming()
 	else
-		toggleButton.Text = "Farm Pumpkins: OFF"
-		toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50) -- สีแดง (ปิดอยู่)
+		toggleButton.Text = "Local Farm: OFF"
+		toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50) -- สีแดง
 	end
 end)
