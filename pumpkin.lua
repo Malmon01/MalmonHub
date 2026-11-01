@@ -64,14 +64,14 @@ local function tweenToTarget(humanoidRootPart, targetCFrame, duration)
 	currentTween.Completed:Wait()
 end
 
--- ฟังก์ชันโจมตี
+-- ฟังก์ชันโจมตีอัตโนมัติ
 local function attackPumpkin(targetPart)
 	local character = player.Character
 	if not character then return end
 	
 	local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
-	if humanoidRootPart then
-		-- หันหน้ามองไปที่ฟักทอง
+	if humanoidRootPart and targetPart then
+		-- ล็อกหน้าให้หันมองฟักทองเสมอขณะตี
 		humanoidRootPart.CFrame = CFrame.new(humanoidRootPart.Position, targetPart.Position)
 	end
 	
@@ -91,7 +91,7 @@ local function attackPumpkin(targetPart)
 	end)
 end
 
--- ฟังก์ชันหลักในการฟาร์ม
+-- ฟังก์ชันหลักในการฟาร์มแบบออโต้ต่อเนื่อง
 local function startFarming()
 	task.spawn(function()
 		while isRunning do
@@ -113,47 +113,45 @@ local function startFarming()
 				local pumpkins = pumpkinsFolder:GetChildren()
 				local foundTarget = false
 				
+				-- วนลูปเช็คฟักทองทีละลูกในโฟลเดอร์
 				for _, pumpkin in ipairs(pumpkins) do
 					if not isRunning then break end
 					
-					local targetPart = nil
-					if pumpkin:IsA("BasePart") then
-						targetPart = pumpkin
-					elseif pumpkin:IsA("Model") then
-						targetPart = pumpkin.PrimaryPart or pumpkin:FindFirstChildWhichIsA("BasePart")
-					end
-					
-					if targetPart then
-						foundTarget = true
-						
-						-- ปรับตำแหน่งยืนให้อยู่ห่างจากตัวฟักทองมากขึ้น (ถอยหลังออกมา -6 หน่วย เพื่อไม่ให้ชนกล่องฟิสิกส์เดิม)
-						local destCFrame = targetPart.CFrame * CFrame.new(0, 3, -6)
-						
-						-- เคลื่อนที่แบบ Tween เข้าหาฟักทองอย่างนุ่มนวล
-						tweenToTarget(humanoidRootPart, destCFrame, 0.2)
-						task.wait(0.05)
-						
-						-- ตัวแปรจับเวลา Timeout (ถ้าตีลูกนี้ไม่แตกภายใน 3.5 วินาที ให้ข้ามทันทีป้องกันติดบัค)
-						local attackStartTime = tick()
-						
-						-- วนลูปตีจนกว่าฟักทองจะถูกทำลาย (หายไปจากโฟลเดอร์)
-						while isRunning and pumpkin.Parent == pumpkinsFolder and (tick() - attackStartTime < 3.5) do
-							equipHammer()
-							
-							if humanoidRootPart and targetPart then
-								humanoidRootPart.CFrame = CFrame.new(humanoidRootPart.Position, targetPart.Position)
-							end
-							
-							attackPumpkin(targetPart)
-							task.wait(0.2)
+					-- เช็คว่าฟักทองลูกนั้นยังมีตัวตนอยู่จริงไหม (ไม่ได้ถูกทำลายไปแล้ว)
+					if pumpkin and pumpkin.Parent == pumpkinsFolder then
+						local targetPart = nil
+						if pumpkin:IsA("BasePart") then
+							targetPart = pumpkin
+						elseif pumpkin:IsA("Model") then
+							targetPart = pumpkin.PrimaryPart or pumpkin:FindFirstChildWhichIsA("BasePart")
 						end
 						
-						-- ขยับถอยหลังออกเล็กน้อยหลังตีเสร็จ เพื่อเคลียร์สถานะการชน (Collision) กับลูกถัดไป
-						humanoidRootPart.CFrame = humanoidRootPart.CFrame * CFrame.new(0, 0, 2)
-						task.wait(0.1)
+						if targetPart then
+							foundTarget = true
+							
+							-- คำนวณตำแหน่งยืนด้านหน้าฟักทอง
+							local destCFrame = targetPart.CFrame * CFrame.new(0, 3, -6)
+							
+							-- พุ่งตัวไปหาฟักทองลูกนี้แบบสมูท
+							tweenToTarget(humanoidRootPart, destCFrame, 0.15)
+							task.wait(0.05)
+							
+							-- ตัวแปรจับเวลา Timeout ป้องกันกรณีฟักทองค้าง (4 วินาที)
+							local attackStartTime = tick()
+							
+							-- ตีรัวๆ อัตโนมัติจนกว่าฟักทองลูกนี้จะถูกทำลาย (หายไปจากโฟลเดอร์)
+							while isRunning and pumpkin.Parent == pumpkinsFolder and (tick() - attackStartTime < 4) do
+								equipHammer()
+								attackPumpkin(targetPart)
+								task.wait(0.15) -- ความเร็วในการตีรัว (ปรับค่าน้อยลงจะตีเร็วขึ้น)
+							end
+							
+							task.wait(0.05)
+						end
 					end
 				end
 				
+				-- ถ้ากวาดฟักทองหมดทุกอันในโฟลเดอร์แล้ว ให้รอสักครู่แล้วสแกนหาใหม่ทันที
 				if not foundTarget then
 					task.wait(0.5)
 				end
@@ -161,7 +159,7 @@ local function startFarming()
 				task.wait(1)
 			end
 			
-			task.wait(0.1)
+			task.wait(0.05)
 		end
 		
 		if currentTween then
