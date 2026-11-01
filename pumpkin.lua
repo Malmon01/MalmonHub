@@ -7,7 +7,7 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
--- เข้าถึง Remote Event สำหรับ Swing ตามที่คุณเคยแจ้งมา
+-- เข้าถึง Remote Event สำหรับ Swing
 local eventAction = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("EventAction")
 
 -- สร้าง ScreenGui และ UI เปิด/ปิด
@@ -34,12 +34,11 @@ uiCorner.Parent = toggleButton
 -- สถานะการทำงาน
 local isRunning = false
 
--- ฟังก์ชันบังคับถืออุปกรณ์ (Tool) ใน Backpack ให้มาอยู่ที่ตัวละคร
+-- ฟังก์ชันบังคับถือค้อน
 local function equipHammer()
 	local character = player.Character
 	local backpack = player:FindFirstChild("Backpack")
 	if character and backpack then
-		-- เช็คว่าตัวละครถือ tool อยู่แล้วหรือยัง
 		local currentTool = character:FindFirstChildOfClass("Tool")
 		if not currentTool then
 			local tool = backpack:FindFirstChildOfClass("Tool")
@@ -50,20 +49,20 @@ local function equipHammer()
 	end
 end
 
--- ฟังก์ชันโจมตี (ส่ง Remote Event + จำลองคลิกซ้ายเผื่อไว้)
+-- ฟังก์ชันโจมตี
 local function attackTarget(targetPart)
 	local character = player.Character
 	if character and character:FindFirstChild("HumanoidRootPart") then
-		-- หันหน้าไปหาฟักทองเสมอเวลากดตี
+		-- หันหน้าไปหาฟักทอง
 		character.HumanoidRootPart.CFrame = CFrame.new(character.HumanoidRootPart.Position, targetPart.Position)
 	end
 
-	-- 1. เรียก Remote Event ตามที่เกมใช้
+	-- เรียก Remote Event "Swing"
 	pcall(function()
 		eventAction:InvokeServer("Swing")
 	end)
 	
-	-- 2. จำลองการคลิกซ้ายผ่าน VirtualInputManager เผื่อเกมเช็ค Input ฝั่ง Client
+	-- จำลองการคลิกซ้ายเผื่อไว้
 	pcall(function()
 		VirtualInputManager:SendMouseButtonEvent(400, 300, 0, true, game, 0)
 		task.wait(0.02)
@@ -77,12 +76,12 @@ local function startFarming()
 		while isRunning do
 			local character = player.Character
 			local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
+			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 			
 			local eventFolder = Workspace:FindFirstChild("Event")
 			local pumpkinsFolder = eventFolder and eventFolder:FindFirstChild("Pumpkins")
 			
-			if humanoidRootPart and pumpkinsFolder then
-				-- บังคับถือค้อนก่อนเริ่มหาฟักทอง
+			if humanoidRootPart and humanoid and pumpkinsFolder then
 				equipHammer()
 				
 				local pumpkins = pumpkinsFolder:GetChildren()
@@ -101,15 +100,23 @@ local function startFarming()
 					if targetPart then
 						foundTarget = true
 						
-						-- วาร์ปไปใกล้ๆ ฟักทอง (ลอยเหนือหัวเล็กน้อยหรือชิดด้านข้าง)
-						humanoidRootPart.CFrame = targetPart.CFrame + Vector3.new(0, 3, 0)
-						task.wait(0.1)
+						-- ป้องกันตัวละครล้มกลิ้ง: เคลียร์ความเร็ว (Velocity) และตั้งค่าทรงตัว
+						humanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+						humanoidRootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
 						
-						-- วนลูปตีซ้ำๆ จนกว่าฟักทองลูกนี้จะถูกทำลาย (หายไปจากโฟลเดอร์ Pumpkins)
+						-- วาร์ปไปยืนระยะห่างที่พอเหมาะด้านหน้าฟักทอง (ไม่ให้ทับซ้อนกันจนบัค)
+						humanoidRootPart.CFrame = targetPart.CFrame + Vector3.new(0, 3, -4)
+						task.wait(0.05)
+						
+						-- ล็อกการหันและตีจนกว่าฟักทองจะถูกทำลาย
 						while isRunning and pumpkin.Parent == pumpkinsFolder do
-							equipHammer() -- เช็คและถือค้อนซ้ำกันหลุดมือ
+							equipHammer()
+							
+							-- ล็อกความเร็วไม่ให้ไหลหรือล้ม
+							humanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+							
 							attackTarget(targetPart)
-							task.wait(0.25) -- หน่วงเวลาจังหวะการตี
+							task.wait(0.2)
 						end
 						
 						task.wait(0.1)
@@ -117,7 +124,7 @@ local function startFarming()
 				end
 				
 				if not foundTarget then
-					task.wait(0.5) -- ถ้ายัังไม่มีฟักทองเกิดใหม่ ให้รอสักครู่
+					task.wait(0.5)
 				end
 			else
 				task.wait(1)
@@ -134,10 +141,10 @@ toggleButton.MouseButton1Click:Connect(function()
 	
 	if isRunning then
 		toggleButton.Text = "Pumpkin Farm: ON"
-		toggleButton.BackgroundColor3 = Color3.fromRGB(50, 200, 50) -- สีเขียว
+		toggleButton.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
 		startFarming()
 	else
 		toggleButton.Text = "Pumpkin Farm: OFF"
-		toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50) -- สีแดง
+		toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
 	end
 end)
