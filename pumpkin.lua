@@ -1,14 +1,12 @@
 -- Services
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local VirtualInputManager = game:GetService("VirtualInputManager")
+local RunService = game:GetService("RunService")
+local VirtualUser = game:GetService("VirtualUser")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
-
--- เข้าถึง Remote Event สำหรับ Swing
-local eventAction = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("EventAction")
+local camera = Workspace.CurrentCamera
 
 -- สร้าง ScreenGui และ UI เปิด/ปิด
 local screenGui = Instance.new("ScreenGui")
@@ -49,23 +47,30 @@ local function equipHammer()
 	end
 end
 
--- ฟังก์ชันโจมตี (ส่ง Object ของฟักทองไปกับ Server ด้วย)
-local function attackTarget(targetPart, pumpkinInstance)
+-- ฟังก์ชันโจมตีโดยใช้ Tool:Activate() และจำลองคลิกเมาส์
+local function attackPumpkin(targetPart)
 	local character = player.Character
-	if character and character:FindFirstChild("HumanoidRootPart") then
-		character.HumanoidRootPart.CFrame = CFrame.new(character.HumanoidRootPart.Position, targetPart.Position)
-	end
-
-	-- ส่งชื่อคำสั่งและตัวฟักทองไปให้ Server ประมวลผล
-	pcall(function()
-		eventAction:InvokeServer("Swing", pumpkinInstance)
-	end)
+	if not character then return end
 	
-	-- จำลองการคลิกซ้ายเผื่อไว้
+	local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+	if humanoidRootPart then
+		-- หันหน้ามองไปที่ฟักทอง
+		humanoidRootPart.CFrame = CFrame.new(humanoidRootPart.Position, targetPart.Position)
+	end
+	
+	-- บังคับใช้งาน Tool ที่ถืออยู่ (เรียกใช้งานฟังก์ชันตีของค้อนโดยตรง)
+	local tool = character:FindFirstChildOfClass("Tool")
+	if tool then
+		pcall(function()
+			tool:Activate()
+		end)
+	end
+	
+	-- จำลองการคลิกซ้ายผ่าน VirtualUser เพื่อให้เกมรับรู้การกดตี
 	pcall(function()
-		VirtualInputManager:SendMouseButtonEvent(400, 300, 0, true, game, 0)
-		task.wait(0.02)
-		VirtualInputManager:SendMouseButtonEvent(400, 300, 0, false, game, 0)
+		VirtualUser:Button1Down(Vector2.new(400, 300))
+		task.wait(0.05)
+		VirtualUser:Button1Up(Vector2.new(400, 300))
 	end)
 end
 
@@ -81,7 +86,7 @@ local function startFarming()
 			local pumpkinsFolder = eventFolder and eventFolder:FindFirstChild("Pumpkins")
 			
 			if humanoidRootPart and humanoid and pumpkinsFolder then
-				-- ป้องกันตัวละครล้ม (ปิดสถานะล้มกลิ้งทั้งหมด)
+				-- ป้องกันตัวละครล้ม
 				pcall(function()
 					humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
 					humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
@@ -96,7 +101,7 @@ local function startFarming()
 					if not isRunning then break end
 					
 					local targetPart = nil
-					if pumpkin:IsA("BasePart") then
+					if pumpkin:IsA("BasePart")  then
 						targetPart = pumpkin
 					elseif pumpkin:IsA("Model") then
 						targetPart = pumpkin.PrimaryPart or pumpkin:FindFirstChildWhichIsA("BasePart")
@@ -105,22 +110,25 @@ local function startFarming()
 					if targetPart then
 						foundTarget = true
 						
-						-- รีเซ็ตความเร็วและลอยตัวให้อยู่ห่างจากจุดปะทะ
+						-- เคลียร์แรงเหวี่ยงและวาร์ปไปยืนระยะประชิดที่เหมาะสมด้านหน้าฟักทอง
 						humanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-						humanoidRootPart.CFrame = targetPart.CFrame + Vector3.new(0, 4, -5)
+						humanoidRootPart.CFrame = targetPart.CFrame + Vector3.new(0, 3, -4)
 						task.wait(0.05)
 						
-						-- ล็อกตำแหน่งชั่วคราวให้ยืนตีโดยไม่ขยับ
+						-- ล็อกตำแหน่งตัวละครให้อยู่กับที่ขณะตี
 						humanoidRootPart.Anchored = true
 						
-						-- วนลูปตีจนกว่าฟักทองจะถูกทำลาย
-						while isRunning and pumpkin.Parent == pumpkinsFolder do
+						-- ตัวแปรนับเวลาป้องกันกรณีตีนานเกินไปแล้วฟักทองไม่ยอมแตก (เช่น 4 วินาที ข้ามไปลูกอื่นทันที)
+						local attackStartTime = tick()
+						
+						-- วนลูปตีจนกว่าฟักทองจะถูกทำลาย (หายไปจากโฟลเดอร์)
+						while isRunning and pumpkin.Parent == pumpkinsFolder and (tick() - attackStartTime < 4) do
 							equipHammer()
-							attackTarget(targetPart, pumpkin)
-							task.wait(0.2)
+							attackPumpkin(targetPart)
+							task.wait(0.3) -- หน่วงเวลาการตีไม่ให้รัวเกินไปจนเกมบล็อก
 						end
 						
-						-- ปลดล็อกตัวละครเพื่อไปลูกถัดไป
+						-- ปลดล็อกตัวละครเพื่อเปลี่ยนเป้าหมาย
 						humanoidRootPart.Anchored = false
 						task.wait(0.1)
 					end
@@ -140,7 +148,7 @@ local function startFarming()
 			task.wait(0.1)
 		end
 		
-		-- คืนค่าเมื่อปิด
+		-- คืนค่าเมื่อปิดสคริปต์
 		local character = player.Character
 		if character and character:FindFirstChild("HumanoidRootPart") then
 			character.HumanoidRootPart.Anchored = false
