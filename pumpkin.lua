@@ -76,7 +76,7 @@ local function startFarming()
 		while isRunning do
 			local character = player.Character
 			local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
-			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+			local humanoid = character and character:FindFirstChild("Humanoid")
 			
 			local eventFolder = Workspace:FindFirstChild("Event")
 			local pumpkinsFolder = eventFolder and eventFolder:FindFirstChild("Pumpkins")
@@ -100,27 +100,32 @@ local function startFarming()
 					if targetPart then
 						foundTarget = true
 						
-						-- ป้องกันตัวละครล้มกลิ้ง: เคลียร์ความเร็ว (Velocity) และตั้งค่าทรงตัว
-						humanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-						humanoidRootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+						-- ปลดล็อกการล้มและรีเซ็ตค่าสถานะตัวละคร
+						humanoid.PlatformStand = false
 						
-						-- วาร์ปไปยืนระยะห่างที่พอเหมาะด้านหน้าฟักทอง (ไม่ให้ทับซ้อนกันจนบัค)
-						humanoidRootPart.CFrame = targetPart.CFrame + Vector3.new(0, 3, -4)
+						-- วาร์ปไปยืนด้านหน้าฟักทอง (เว้นระยะห่างเพื่อไม่ให้ชนตัวฟักทองจนล้ม)
+						humanoidRootPart.CFrame = targetPart.CFrame + Vector3.new(0, 3, -5)
 						task.wait(0.05)
 						
-						-- ล็อกการหันและตีจนกว่าฟักทองจะถูกทำลาย
+						-- ตรึงตัวละครให้อยู่กับที่ (Anchored) เพื่อไม่ให้ล้มกลิ้งหรือไหลไปชน
+						humanoidRootPart.Anchored = true
+						
+						-- ลูปตีจนกว่าฟักทองจะถูกทำลาย
 						while isRunning and pumpkin.Parent == pumpkinsFolder do
 							equipHammer()
-							
-							-- ล็อกความเร็วไม่ให้ไหลหรือล้ม
-							humanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-							
 							attackTarget(targetPart)
 							task.wait(0.2)
 						end
 						
+						-- ปลดล็อกการตรึงก่อนเปลี่ยนเป้าหมายไปลูกถัดไป
+						humanoidRootPart.Anchored = false
 						task.wait(0.1)
 					end
+				end
+				
+				-- ปลดล็อกความปลอดภัยกรณีวนลูปจบ
+				if humanoidRootPart.Anchored then
+					humanoidRootPart.Anchored = false
 				end
 				
 				if not foundTarget then
@@ -131,6 +136,12 @@ local function startFarming()
 			end
 			
 			task.wait(0.1)
+		end
+		
+		-- คืนค่าความปกติเมื่อกดปิดสคริปต์
+		local character = player.Character
+		if character and character:FindFirstChild("HumanoidRootPart") then
+			character.HumanoidRootPart.Anchored = false
 		end
 	end)
 end
@@ -146,5 +157,11 @@ toggleButton.MouseButton1Click:Connect(function()
 	else
 		toggleButton.Text = "Pumpkin Farm: OFF"
 		toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+		
+		-- ปลดล็อกทันทีเมื่อกดปิด
+		local character = player.Character
+		if character and character:FindFirstChild("HumanoidRootPart") then
+			character.HumanoidRootPart.Anchored = false
+		end
 	end
 end)
