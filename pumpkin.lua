@@ -1,12 +1,11 @@
 -- Services
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
-local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 local VirtualUser = game:GetService("VirtualUser")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
-local camera = Workspace.CurrentCamera
 
 -- สร้าง ScreenGui และ UI เปิด/ปิด
 local screenGui = Instance.new("ScreenGui")
@@ -31,6 +30,7 @@ uiCorner.Parent = toggleButton
 
 -- สถานะการทำงาน
 local isRunning = false
+local currentTween = nil -- ตัวแปรเก็บ Tween ปัจจุบันเพื่อใช้สั่งยกเลิกถ้าจำเป็น
 
 -- ฟังก์ชันบังคับถือค้อน
 local function equipHammer()
@@ -47,7 +47,25 @@ local function equipHammer()
 	end
 end
 
--- ฟังก์ชันโจมตีโดยใช้ Tool:Activate() และจำลองคลิกเมาส์
+-- ฟังก์ชันเคลื่อนที่แบบ Smooth (Tween) ไปหาเป้าหมาย
+local function tweenToTarget(humanoidRootPart, targetCFrame, duration)
+	if currentTween then
+		currentTween:Cancel()
+	end
+	
+	-- กำหนดรูปแบบความเร็ว (EasingStyle) ให้เคลื่อนที่นุ่มนวล
+	local tweenInfo = TweenInfo.new(
+		duration, -- ระยะเวลา (วินาที) ยิ่งน้อยยิ่งไปเร็ว
+		Enum.EasingStyle.Linear,
+		Enum.EasingDirection.Out
+	)
+	
+	currentTween = TweenService:Create(humanoidRootPart, tweenInfo, {CFrame = targetCFrame})
+	currentTween:Play()
+	currentTween.Completed:Wait()
+end
+
+-- ฟังก์ชันโจมตี
 local function attackPumpkin(targetPart)
 	local character = player.Character
 	if not character then return end
@@ -58,7 +76,7 @@ local function attackPumpkin(targetPart)
 		humanoidRootPart.CFrame = CFrame.new(humanoidRootPart.Position, targetPart.Position)
 	end
 	
-	-- บังคับใช้งาน Tool ที่ถืออยู่ (เรียกใช้งานฟังก์ชันตีของค้อนโดยตรง)
+	-- ใช้ Tool:Activate() เพื่อตี
 	local tool = character:FindFirstChildOfClass("Tool")
 	if tool then
 		pcall(function()
@@ -66,10 +84,10 @@ local function attackPumpkin(targetPart)
 		end)
 	end
 	
-	-- จำลองการคลิกซ้ายผ่าน VirtualUser เพื่อให้เกมรับรู้การกดตี
+	-- จำลองคลิกซ้ายเผื่อระบบเกมเช็ค Input
 	pcall(function()
 		VirtualUser:Button1Down(Vector2.new(400, 300))
-		task.wait(0.05)
+		task.wait(0.02)
 		VirtualUser:Button1Up(Vector2.new(400, 300))
 	end)
 end
@@ -86,7 +104,6 @@ local function startFarming()
 			local pumpkinsFolder = eventFolder and eventFolder:FindFirstChild("Pumpkins")
 			
 			if humanoidRootPart and humanoid and pumpkinsFolder then
-				-- ป้องกันตัวละครล้ม
 				pcall(function()
 					humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
 					humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
@@ -101,7 +118,7 @@ local function startFarming()
 					if not isRunning then break end
 					
 					local targetPart = nil
-					if pumpkin:IsA("BasePart")  then
+					if pumpkin:IsA("BasePart") then
 						targetPart = pumpkin
 					elseif pumpkin:IsA("Model") then
 						targetPart = pumpkin.PrimaryPart or pumpkin:FindFirstChildWhichIsA("BasePart")
@@ -110,32 +127,30 @@ local function startFarming()
 					if targetPart then
 						foundTarget = true
 						
-						-- เคลียร์แรงเหวี่ยงและวาร์ปไปยืนระยะประชิดที่เหมาะสมด้านหน้าฟักทอง
-						humanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-						humanoidRootPart.CFrame = targetPart.CFrame + Vector3.new(0, 3, -4)
-						task.wait(0.05)
+						-- คำนวณตำแหน่งปลายทาง (ด้านหน้าฟักทอง ห่างออกมานิดหน่อย)
+						local destCFrame = targetPart.CFrame + Vector3.new(0, 3, -4)
 						
-						-- ล็อกตำแหน่งตัวละครให้อยู่กับที่ขณะตี
-						humanoidRootPart.Anchored = true
+						-- เคลื่อนที่แบบสมูท (Tween) ใช้เวลา 0.3 วินาทีในการพุ่งตัวไปหาฟักทอง
+						tweenToTarget(humanoidRootPart, destCFrame, 0.3)
 						
-						-- ตัวแปรนับเวลาป้องกันกรณีตีนานเกินไปแล้วฟักทองไม่ยอมแตก (เช่น 4 วินาที ข้ามไปลูกอื่นทันที)
+						-- ตัวแปรนับเวลาป้องกันตีไม่แตก (Timeout 4 วินาที)
 						local attackStartTime = tick()
 						
 						-- วนลูปตีจนกว่าฟักทองจะถูกทำลาย (หายไปจากโฟลเดอร์)
 						while isRunning and pumpkin.Parent == pumpkinsFolder and (tick() - attackStartTime < 4) do
 							equipHammer()
+							
+							-- ล็อกหันหน้าหาฟักทองตลอดเวลาที่ตี
+							if humanoidRootPart and targetPart then
+								humanoidRootPart.CFrame = CFrame.new(humanoidRootPart.Position, targetPart.Position)
+							end
+							
 							attackPumpkin(targetPart)
-							task.wait(0.3) -- หน่วงเวลาการตีไม่ให้รัวเกินไปจนเกมบล็อก
+							task.wait(0.25)
 						end
 						
-						-- ปลดล็อกตัวละครเพื่อเปลี่ยนเป้าหมาย
-						humanoidRootPart.Anchored = false
 						task.wait(0.1)
 					end
-				end
-				
-				if humanoidRootPart.Anchored then
-					humanoidRootPart.Anchored = false
 				end
 				
 				if not foundTarget then
@@ -148,10 +163,8 @@ local function startFarming()
 			task.wait(0.1)
 		end
 		
-		-- คืนค่าเมื่อปิดสคริปต์
-		local character = player.Character
-		if character and character:FindFirstChild("HumanoidRootPart") then
-			character.HumanoidRootPart.Anchored = false
+		if currentTween then
+			currentTween:Cancel()
 		end
 	end)
 end
@@ -167,10 +180,8 @@ toggleButton.MouseButton1Click:Connect(function()
 	else
 		toggleButton.Text = "Pumpkin Farm: OFF"
 		toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-		
-		local character = player.Character
-		if character and character:FindFirstChild("HumanoidRootPart") then
-			character.HumanoidRootPart.Anchored = false
+		if currentTween then
+			currentTween:Cancel()
 		end
 	end
 end)
