@@ -49,17 +49,16 @@ local function equipHammer()
 	end
 end
 
--- ฟังก์ชันโจมตี
-local function attackTarget(targetPart)
+-- ฟังก์ชันโจมตี (ส่ง Object ของฟักทองไปกับ Server ด้วย)
+local function attackTarget(targetPart, pumpkinInstance)
 	local character = player.Character
 	if character and character:FindFirstChild("HumanoidRootPart") then
-		-- หันหน้าไปหาฟักทอง
 		character.HumanoidRootPart.CFrame = CFrame.new(character.HumanoidRootPart.Position, targetPart.Position)
 	end
 
-	-- เรียก Remote Event "Swing"
+	-- ส่งชื่อคำสั่งและตัวฟักทองไปให้ Server ประมวลผล
 	pcall(function()
-		eventAction:InvokeServer("Swing")
+		eventAction:InvokeServer("Swing", pumpkinInstance)
 	end)
 	
 	-- จำลองการคลิกซ้ายเผื่อไว้
@@ -82,6 +81,12 @@ local function startFarming()
 			local pumpkinsFolder = eventFolder and eventFolder:FindFirstChild("Pumpkins")
 			
 			if humanoidRootPart and humanoid and pumpkinsFolder then
+				-- ป้องกันตัวละครล้ม (ปิดสถานะล้มกลิ้งทั้งหมด)
+				pcall(function()
+					humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+					humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+				end)
+				
 				equipHammer()
 				
 				local pumpkins = pumpkinsFolder:GetChildren()
@@ -100,30 +105,27 @@ local function startFarming()
 					if targetPart then
 						foundTarget = true
 						
-						-- ปลดล็อกการล้มและรีเซ็ตค่าสถานะตัวละคร
-						humanoid.PlatformStand = false
-						
-						-- วาร์ปไปยืนด้านหน้าฟักทอง (เว้นระยะห่างเพื่อไม่ให้ชนตัวฟักทองจนล้ม)
-						humanoidRootPart.CFrame = targetPart.CFrame + Vector3.new(0, 3, -5)
+						-- รีเซ็ตความเร็วและลอยตัวให้อยู่ห่างจากจุดปะทะ
+						humanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+						humanoidRootPart.CFrame = targetPart.CFrame + Vector3.new(0, 4, -5)
 						task.wait(0.05)
 						
-						-- ตรึงตัวละครให้อยู่กับที่ (Anchored) เพื่อไม่ให้ล้มกลิ้งหรือไหลไปชน
+						-- ล็อกตำแหน่งชั่วคราวให้ยืนตีโดยไม่ขยับ
 						humanoidRootPart.Anchored = true
 						
-						-- ลูปตีจนกว่าฟักทองจะถูกทำลาย
+						-- วนลูปตีจนกว่าฟักทองจะถูกทำลาย
 						while isRunning and pumpkin.Parent == pumpkinsFolder do
 							equipHammer()
-							attackTarget(targetPart)
+							attackTarget(targetPart, pumpkin)
 							task.wait(0.2)
 						end
 						
-						-- ปลดล็อกการตรึงก่อนเปลี่ยนเป้าหมายไปลูกถัดไป
+						-- ปลดล็อกตัวละครเพื่อไปลูกถัดไป
 						humanoidRootPart.Anchored = false
 						task.wait(0.1)
 					end
 				end
 				
-				-- ปลดล็อกความปลอดภัยกรณีวนลูปจบ
 				if humanoidRootPart.Anchored then
 					humanoidRootPart.Anchored = false
 				end
@@ -138,7 +140,7 @@ local function startFarming()
 			task.wait(0.1)
 		end
 		
-		-- คืนค่าความปกติเมื่อกดปิดสคริปต์
+		-- คืนค่าเมื่อปิด
 		local character = player.Character
 		if character and character:FindFirstChild("HumanoidRootPart") then
 			character.HumanoidRootPart.Anchored = false
@@ -158,7 +160,6 @@ toggleButton.MouseButton1Click:Connect(function()
 		toggleButton.Text = "Pumpkin Farm: OFF"
 		toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
 		
-		-- ปลดล็อกทันทีเมื่อกดปิด
 		local character = player.Character
 		if character and character:FindFirstChild("HumanoidRootPart") then
 			character.HumanoidRootPart.Anchored = false
