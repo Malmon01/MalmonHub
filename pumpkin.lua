@@ -30,7 +30,7 @@ uiCorner.Parent = toggleButton
 
 -- สถานะการทำงาน
 local isRunning = false
-local currentTween = nil -- ตัวแปรเก็บ Tween ปัจจุบันเพื่อใช้สั่งยกเลิกถ้าจำเป็น
+local currentTween = nil
 
 -- ฟังก์ชันบังคับถือค้อน
 local function equipHammer()
@@ -53,9 +53,8 @@ local function tweenToTarget(humanoidRootPart, targetCFrame, duration)
 		currentTween:Cancel()
 	end
 	
-	-- กำหนดรูปแบบความเร็ว (EasingStyle) ให้เคลื่อนที่นุ่มนวล
 	local tweenInfo = TweenInfo.new(
-		duration, -- ระยะเวลา (วินาที) ยิ่งน้อยยิ่งไปเร็ว
+		duration,
 		Enum.EasingStyle.Linear,
 		Enum.EasingDirection.Out
 	)
@@ -84,7 +83,7 @@ local function attackPumpkin(targetPart)
 		end)
 	end
 	
-	-- จำลองคลิกซ้ายเผื่อระบบเกมเช็ค Input
+	-- จำลองคลิกซ้าย
 	pcall(function()
 		VirtualUser:Button1Down(Vector2.new(400, 300))
 		task.wait(0.02)
@@ -127,28 +126,30 @@ local function startFarming()
 					if targetPart then
 						foundTarget = true
 						
-						-- คำนวณตำแหน่งปลายทาง (ด้านหน้าฟักทอง ห่างออกมานิดหน่อย)
-						local destCFrame = targetPart.CFrame + Vector3.new(0, 3, -4)
+						-- ปรับตำแหน่งยืนให้อยู่ห่างจากตัวฟักทองมากขึ้น (ถอยหลังออกมา -6 หน่วย เพื่อไม่ให้ชนกล่องฟิสิกส์เดิม)
+						local destCFrame = targetPart.CFrame * CFrame.new(0, 3, -6)
 						
-						-- เคลื่อนที่แบบสมูท (Tween) ใช้เวลา 0.3 วินาทีในการพุ่งตัวไปหาฟักทอง
-						tweenToTarget(humanoidRootPart, destCFrame, 0.3)
+						-- เคลื่อนที่แบบ Tween เข้าหาฟักทองอย่างนุ่มนวล
+						tweenToTarget(humanoidRootPart, destCFrame, 0.2)
+						task.wait(0.05)
 						
-						-- ตัวแปรนับเวลาป้องกันตีไม่แตก (Timeout 4 วินาที)
+						-- ตัวแปรจับเวลา Timeout (ถ้าตีลูกนี้ไม่แตกภายใน 3.5 วินาที ให้ข้ามทันทีป้องกันติดบัค)
 						local attackStartTime = tick()
 						
 						-- วนลูปตีจนกว่าฟักทองจะถูกทำลาย (หายไปจากโฟลเดอร์)
-						while isRunning and pumpkin.Parent == pumpkinsFolder and (tick() - attackStartTime < 4) do
+						while isRunning and pumpkin.Parent == pumpkinsFolder and (tick() - attackStartTime < 3.5) do
 							equipHammer()
 							
-							-- ล็อกหันหน้าหาฟักทองตลอดเวลาที่ตี
 							if humanoidRootPart and targetPart then
 								humanoidRootPart.CFrame = CFrame.new(humanoidRootPart.Position, targetPart.Position)
 							end
 							
 							attackPumpkin(targetPart)
-							task.wait(0.25)
+							task.wait(0.2)
 						end
 						
+						-- ขยับถอยหลังออกเล็กน้อยหลังตีเสร็จ เพื่อเคลียร์สถานะการชน (Collision) กับลูกถัดไป
+						humanoidRootPart.CFrame = humanoidRootPart.CFrame * CFrame.new(0, 0, 2)
 						task.wait(0.1)
 					end
 				end
