@@ -1,192 +1,180 @@
--- Roblox Studio: StarterPlayer > StarterPlayerScripts > LocalScript
--- Test with Play. Client-side movement panel for your own experience.
+-- Read-only game-state probe. No movement, pickup, remote calls, or hooks.
+-- Run once, then pick up a cheap animal and let a guardian hit you.
+-- Press Copy log afterwards. Close stops the probe and removes its local GUI.
 local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
+local CollectionService = game:GetService("CollectionService")
+local HttpService = game:GetService("HttpService")
 local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
-
--- Add more destinations here. Coordinates below come from the attached image.
-local LOCATIONS = {
-	{ name = "Spawn Point", position = Vector3.new(-743.648132, 37.7241478, 124.247498) },
-}
-local TELEPORT_HEIGHT_OFFSET = 3
-local JUMP_SPEED = 50
-local infiniteJump = false
-local noclip = false
-local originalCollision = {}
-local connections = {}
-local cleaned = false
-
--- Replacing a previous panel also disconnects its movement handlers.
-local previous = playerGui:FindFirstChild("MovementPanel")
-if previous then previous:Destroy() end
+local started = os.clock()
+local running = true
+local lines = {}
+local refs = setmetatable({}, {__mode = "k"})
+local nextRef = 0
 
 local gui = Instance.new("ScreenGui")
-gui.Name = "MovementPanel"
+-- This experience's CarryController allows this name while carrying.
+gui.Name = "ProximityPrompts"
 gui.ResetOnSpawn = false
-gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-gui.Parent = playerGui
-
-local function round(object, radius)
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, radius)
-	corner.Parent = object
-end
-
-local panel = Instance.new("Frame")
-panel.Size = UDim2.fromOffset(280, 228 + #LOCATIONS * 40)
-panel.Position = UDim2.new(0, 12, 0.5, -(228 + #LOCATIONS * 40) / 2)
-panel.BackgroundColor3 = Color3.fromRGB(25, 28, 36)
-panel.Parent = gui
-round(panel, 12)
-
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, -20, 0, 42)
-title.Position = UDim2.fromOffset(10, 0)
-title.BackgroundTransparency = 1
-title.Text = "Movement Panel"
-title.TextColor3 = Color3.new(1, 1, 1)
-title.Font = Enum.Font.GothamBold
-title.TextSize = 18
-title.Parent = panel
-
-local function button(text, parent, y)
+gui.DisplayOrder = 1000
+gui:SetAttribute("AfkEggProbe", true)
+gui.Parent = player:WaitForChild("PlayerGui")
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0.72, 0, 0.5, 0)
+frame.Position = UDim2.new(0.14, 0, 0.16, 0)
+frame.BackgroundColor3 = Color3.fromRGB(24, 28, 35)
+frame.Parent = gui
+local box = Instance.new("TextBox")
+box.Position = UDim2.fromOffset(8, 46)
+box.Size = UDim2.new(1, -16, 1, -54)
+box.BackgroundColor3 = Color3.fromRGB(15, 18, 24)
+box.TextColor3 = Color3.new(1, 1, 1)
+box.TextSize = 12
+box.Font = Enum.Font.Code
+box.TextXAlignment = Enum.TextXAlignment.Left
+box.TextYAlignment = Enum.TextYAlignment.Top
+box.TextWrapped = true
+box.MultiLine = true
+box.ClearTextOnFocus = false
+box.TextEditable = false
+box.Text = "AFK Egg Probe: waiting for pickup"
+box.Parent = frame
+local function button(label, x)
 	local b = Instance.new("TextButton")
-	b.Size = UDim2.new(1, -24, 0, 34)
-	b.Position = UDim2.fromOffset(12, y)
-	b.BackgroundColor3 = Color3.fromRGB(55, 61, 77)
-	b.TextColor3 = Color3.new(1, 1, 1)
+	b.Position = UDim2.fromOffset(x, 6)
+	b.Size = UDim2.fromOffset(110, 32)
+	b.Text = label
 	b.TextSize = 14
-	b.Font = Enum.Font.GothamMedium
-	b.Text = text
-	b.Parent = parent
-	round(b, 8)
+	b.TextColor3 = Color3.new(1, 1, 1)
+	b.BackgroundColor3 = Color3.fromRGB(45, 91, 120)
+	b.Parent = frame
 	return b
 end
-
-local function connect(signal, callback)
-	local connection = signal:Connect(callback)
-	table.insert(connections, connection)
-	return connection
+local copy = button("Copy log", 8)
+local hide = button("Hide log", 126)
+local close = button("Close", 244)
+local function log(message)
+	table.insert(lines, string.format("%.2f %s", os.clock() - started, message))
+	if #lines > 500 then table.remove(lines, 1) end
+	box.Text = table.concat(lines, "\n")
 end
-
-local function restoreCollision()
-	for part, value in pairs(originalCollision) do
-		if part.Parent then part.CanCollide = value end
+local function path(instance)
+	if not instance then return "nil" end
+	local ok, value = pcall(function() return instance:GetFullName() end)
+	return ok and value or "removed"
+end
+local function id(instance)
+	if not refs[instance] then nextRef += 1; refs[instance] = nextRef end
+	return "ref" .. refs[instance]
+end
+local function attributes(instance)
+	local ok, value = pcall(function() return HttpService:JSONEncode(instance:GetAttributes()) end)
+	return ok and value or "[attributes unavailable]"
+end
+local function position(model)
+	if model:IsA("BasePart") then return model.Position end
+	if model:IsA("Model") and model:FindFirstChildWhichIsA("BasePart", true) then
+		return model:GetPivot().Position
 	end
-	table.clear(originalCollision)
+	return nil
+end
+local function describe(model)
+	local p = position(model)
+	log(id(model) .. " " .. path(model) .. " pos=" .. tostring(p) .. " attrs=" .. attributes(model))
+	for _, item in ipairs(model:GetDescendants()) do
+		if item:IsA("ProximityPrompt") then
+			log(" PROMPT " .. path(item) .. " action=" .. item.ActionText
+				.. " object=" .. item.ObjectText .. " enabled=" .. tostring(item.Enabled)
+				.. " hold=" .. item.HoldDuration .. " distance=" .. item.MaxActivationDistance)
+		end
+	end
+end
+local function snapshot(reason)
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	log("SNAP " .. reason .. " Carrying=" .. tostring(player:GetAttribute("Carrying"))
+		.. " BeingChased=" .. tostring(player:GetAttribute("BeingChased"))
+		.. " playerAttrs=" .. attributes(player))
+	if not root then return end
+	log("CHAR attrs=" .. attributes(character) .. " pos=" .. tostring(root.Position)
+		.. " velocity=" .. tostring(root.AssemblyLinearVelocity)
+		.. " state=" .. tostring(humanoid and humanoid:GetState()))
+	local nearby, seen = {}, {}
+	local function add(model)
+		if seen[model] then return end
+		seen[model] = true
+		local p = position(model)
+		if p and (p - root.Position).Magnitude <= 35 then
+			table.insert(nearby, {model = model, distance = (p - root.Position).Magnitude})
+		end
+	end
+	for _, model in ipairs(CollectionService:GetTagged("AnimalPickup")) do add(model) end
+	local folder = workspace:FindFirstChild("AnimalPickups")
+	if folder then for _, model in ipairs(folder:GetChildren()) do add(model) end end
+	table.sort(nearby, function(a, b) return a.distance < b.distance end)
+	log("Nearby AnimalPickup count=" .. #nearby)
+	for index = 1, math.min(#nearby, 6) do describe(nearby[index].model) end
+	for _, item in ipairs(character:GetDescendants()) do
+		if item:IsA("ObjectValue") then
+			log(" CHAR REF " .. path(item) .. " -> " .. path(item.Value))
+		elseif item:IsA("WeldConstraint") or item:IsA("JointInstance") then
+			local a, b = item.Part0, item.Part1
+			if (a and not a:IsDescendantOf(character)) or (b and not b:IsDescendantOf(character)) then
+				log(" EXTERNAL JOINT " .. path(item) .. " " .. path(a) .. " -> " .. path(b))
+			end
+		end
+	end
 end
 
-local function paintToggle(b, label, enabled)
-	b.Text = label .. (enabled and ": ON" or ": OFF")
-	b.BackgroundColor3 = enabled and Color3.fromRGB(28, 132, 92)
-		or Color3.fromRGB(55, 61, 77)
-end
-
-local jumpButton = button("Infinite Jump: OFF", panel, 46)
-local noclipButton = button("Noclip: OFF", panel, 86)
-connect(jumpButton.Activated, function()
-	infiniteJump = not infiniteJump
-	paintToggle(jumpButton, "Infinite Jump", infiniteJump)
+copy.Activated:Connect(function()
+	local text = table.concat(lines, "\n")
+	if type(setclipboard) == "function" then
+		local ok = pcall(setclipboard, text)
+		copy.Text = ok and "Copied" or "Copy failed"
+	else
+		box.TextEditable = true
+		box:CaptureFocus()
+		box.CursorPosition = #box.Text + 1
+		box.SelectionStart = 1
+		copy.Text = "Select / Copy"
+	end
 end)
-connect(noclipButton.Activated, function()
-	noclip = not noclip
-	if not noclip then restoreCollision() end
-	paintToggle(noclipButton, "Noclip", noclip)
+hide.Activated:Connect(function()
+	box.Visible = not box.Visible
+	frame.Size = box.Visible and UDim2.new(0.72, 0, 0.5, 0) or UDim2.new(0.72, 0, 0, 44)
+	hide.Text = box.Visible and "Hide log" or "Show log"
 end)
+close.Activated:Connect(function() running = false; gui:Destroy() end)
+gui.Destroying:Connect(function() running = false end)
 
-local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -24, 0, 30)
-status.Position = UDim2.fromOffset(12, 128 + #LOCATIONS * 40)
-status.BackgroundTransparency = 1
-status.Text = "Ready"
-status.TextColor3 = Color3.fromRGB(195, 202, 220)
-status.TextSize = 12
-status.TextWrapped = true
-status.Font = Enum.Font.Gotham
-status.Parent = panel
-
-for index, destination in ipairs(LOCATIONS) do
-	local teleportButton = button("Teleport: " .. destination.name, panel, 126 + (index - 1) * 40)
-	connect(teleportButton.Activated, function()
+log("START placeId=" .. game.PlaceId .. " version=" .. game.PlaceVersion)
+snapshot("initial")
+task.spawn(function()
+	local previousCarrying = player:GetAttribute("Carrying")
+	local lastSnapshot = os.clock()
+	local lastSpeed = 0
+	while running and os.clock() - started < 90 do
+		task.wait(0.1)
+		if not running then break end
+		local carrying = player:GetAttribute("Carrying")
 		local character = player.Character
 		local root = character and character:FindFirstChild("HumanoidRootPart")
-		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-		if not root or not humanoid or humanoid.Health <= 0 then
-			status.Text = "Wait for your character to spawn."
-			return
+		local speed = root and root.AssemblyLinearVelocity.Magnitude or 0
+		local reason
+		if carrying ~= previousCarrying then
+			reason = "Carrying changed " .. tostring(previousCarrying) .. " -> " .. tostring(carrying)
+		elseif speed > 70 and lastSpeed <= 70 then
+			reason = "velocity threshold crossed (not proof of boss hit)"
+		elseif carrying and os.clock() - lastSnapshot >= 3 then
+			reason = "holding sample"
 		end
-		if humanoid.SeatPart then
-			status.Text = "Leave your seat before teleporting."
-			return
+		if reason then
+			local ok, err = pcall(snapshot, reason)
+			if not ok then log("PROBE ERROR " .. tostring(err)) end
+			lastSnapshot = os.clock()
 		end
-		local target = destination.position + Vector3.new(0, TELEPORT_HEIGHT_OFFSET, 0)
-		-- Translate the whole model so its root reaches the target; preserve orientation.
-		character:PivotTo(character:GetPivot() + (target - root.Position))
-		root.AssemblyLinearVelocity = Vector3.zero
-		root.AssemblyAngularVelocity = Vector3.zero
-		status.Text = "Teleported to " .. destination.name
-	end)
-end
-
-local hideButton = button("Hide menu", panel, 164 + #LOCATIONS * 40)
-local showButton = button("Show menu", gui, 12)
-showButton.Size = UDim2.fromOffset(120, 34)
-showButton.Visible = false
-connect(hideButton.Activated, function()
-	panel.Visible = false
-	showButton.Visible = true
-end)
-connect(showButton.Activated, function()
-	panel.Visible = true
-	showButton.Visible = false
-end)
-
-local lastJump = 0
-connect(UserInputService.JumpRequest, function()
-	if not infiniteJump or UserInputService:GetFocusedTextBox() then return end
-	local now = os.clock()
-	if now - lastJump < 0.12 then return end
-	local character = player.Character
-	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-	local root = character and character:FindFirstChild("HumanoidRootPart")
-	if not humanoid or not root or humanoid.Health <= 0 or humanoid.SeatPart then return end
-	lastJump = now
-	humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-	local velocity = root.AssemblyLinearVelocity
-	root.AssemblyLinearVelocity = Vector3.new(velocity.X, JUMP_SPEED, velocity.Z)
-end)
-
-connect(RunService.PreSimulation, function()
-	if not noclip then return end
-	local character = player.Character
-	if not character then return end
-	for _, part in ipairs(character:GetDescendants()) do
-		if part:IsA("BasePart") then
-			if originalCollision[part] == nil then
-				originalCollision[part] = part.CanCollide
-			end
-			part.CanCollide = false
-		end
+		previousCarrying = carrying
+		lastSpeed = speed
 	end
-end)
-
-connect(player.CharacterRemoving, function()
-	restoreCollision()
-	lastJump = 0
-end)
-
-local function cleanup()
-	if cleaned then return end
-	cleaned = true
-	infiniteJump = false
-	noclip = false
-	for _, connection in ipairs(connections) do connection:Disconnect() end
-	restoreCollision()
-end
-gui.Destroying:Connect(cleanup)
-script.Destroying:Connect(function()
-	cleanup()
-	gui:Destroy()
+	if running then log("STOP: 90-second capture finished. Copy log is ready.") end
 end)
