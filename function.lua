@@ -1,4 +1,4 @@
--- Movement Panel + AFK Egg beta, based on the supplied version-1437 game log.
+-- Movement Panel + AFK Egg beta v2: delayed/separate pickup prompt fix.
 -- One manually selected animal per run. No automatic egg selection or remote guessing.
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -55,7 +55,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -20, 0, 42)
 title.Position = UDim2.fromOffset(10, 0)
 title.BackgroundTransparency = 1
-title.Text = "Movement Panel"
+title.Text = "Movement Panel v2"
 title.TextColor3 = Color3.new(1, 1, 1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 18
@@ -232,12 +232,56 @@ local function modelMatches(model, held)
 end
 
 local function spatialPosition(instance)
+	if not instance then return nil end
 	if instance:IsA("Attachment") then return instance.WorldPosition end
 	if instance:IsA("BasePart") then return instance.Position end
 	if instance:IsA("Model") and instance:FindFirstChildWhichIsA("BasePart", true) then
 		return instance:GetPivot().Position
 	end
 	return nil
+end
+
+-- Display labels can round weights, use suffixes, and add rich text or size labels.
+-- Identify the animal model using attributes; do not parse the display weight as an ID.
+local function containsAnimalName(text, animalName)
+	text = text:gsub("<[^>]+>", ""):lower():gsub("%s+", " ")
+	animalName = animalName:lower():gsub("%s+", " ")
+	local offset = 1
+	while true do
+		local first, last = text:find(animalName, offset, true)
+		if not first then return false end
+		local before, after = text:sub(first - 1, first - 1), text:sub(last + 1, last + 1)
+		if not before:match("[%w_]") and not after:match("[%w_]") then return true end
+		offset = last + 1
+	end
+end
+
+local function distanceToAnimal(point, model)
+	if not model.Parent or not model:FindFirstChildWhichIsA("BasePart", true) then return math.huge end
+	local box, size = model:GetBoundingBox()
+	local localPoint = box:PointToObjectSpace(point)
+	local half = size * 0.5
+	local nearest = Vector3.new(
+		math.clamp(localPoint.X, -half.X, half.X),
+		math.clamp(localPoint.Y, -half.Y, half.Y),
+		math.clamp(localPoint.Z, -half.Z, half.Z)
+	)
+	return (localPoint - nearest).Magnitude
+end
+
+local function directlyReferencesAnimal(prompt, model)
+	if prompt:IsDescendantOf(model) then return true end
+	-- Some prompt implementations store a target ObjectValue on the anchor.
+	for _, parent in ipairs({prompt, prompt.Parent}) do
+		if parent then
+			for _, value in ipairs(parent:GetChildren()) do
+				if value:IsA("ObjectValue") and value.Value then
+					if value.Value == model or value.Value:IsDescendantOf(model) then return true end
+				end
+			end
+		end
+	end
+	return false
 end
 
 local function allPickups()
@@ -280,7 +324,7 @@ local function moveRoot(character, root, position)
 	root.AssemblyAngularVelocity = Vector3.zero
 end
 
-local generation, tween, heldPrompt = 0, nil, nil
+local generation, tween, heldPrompt, pickupKeeper = 0, nil, nil, nil
 local savedMovement = nil
 afk = {active = false}
 function afk.stop(message)
@@ -288,6 +332,7 @@ function afk.stop(message)
 	afk.active = false
 	generation = generation + 1
 	if tween then tween:Cancel(); tween = nil end
+	if pickupKeeper then pickupKeeper:Disconnect(); pickupKeeper = nil end
 	if heldPrompt then pcall(function() heldPrompt:InputHoldEnd() end); heldPrompt = nil end
 	if wasActive and savedMovement and not cleaned then
 		infiniteJump, noclip = savedMovement.jump, savedMovement.noclip
@@ -411,35 +456,56 @@ function afk.start()
 		if not dropped then return "Dropped animal not found; return cancelled." end
 		local droppedPosition = spatialPosition(dropped)
 		if not droppedPosition then return "Animal position unavailable." end
-		moveRoot(character, root, droppedPosition + Vector3.new(0, 2.5, 0))
+		local pickupPoint = droppedPosition + Vector3.new(0, 2.5, 0)
+		moveRoot(character, root, pickupPoint)
+		-- A one-time teleport can be undone by ongoing knockback before
+		-- SmartPromptController has created the prompt.
+		pickupKeeper = RunService.Heartbeat:Connect(function()
+			if valid() and not readHeld() then moveRoot(character, root, pickupPoint) end
+		end)
+		status.Text = "AFK: at animal; waiting for Steal prompt"
 		local ambiguousPrompt = false
+		local namedPrompts, enabledPrompts = 0, 0
+		local lastRescan = -math.huge
 		local prompt = waitFor(function()
 			local candidates = {}
 			local p = spatialPosition(dropped)
 			if not p then return nil end
+			if os.clock() - lastRescan >= 1 then
+				-- Also catch prompts reparented/reused by the custom prompt controller.
+				for _, item in ipairs(workspace:GetDescendants()) do
+					if item:IsA("ProximityPrompt") then prompts[item] = true end
+				end
+				lastRescan = os.clock()
+			end
+			namedPrompts, enabledPrompts = 0, 0
 			for item in pairs(prompts) do
-				if item.Parent and item.Enabled and item.Name == "StealPrompt" then
+				if item.Parent and item:IsDescendantOf(workspace) and item.Name == "StealPrompt" then
+					namedPrompts = namedPrompts + 1
+					if item.Enabled then enabledPrompts = enabledPrompts + 1 end
 					local point = spatialPosition(item.Parent)
-					local text = item.ObjectText:gsub("<[^>]+>", "")
-					local displayedName = text:match("%]%s*(.-)%s*$")
-					local kgText = text:match("%[([%d%.,]+)%s*[Kk][Gg]%]")
-					local displayedKg = kgText and tonumber((kgText:gsub(",", "")))
-					if point and (point - p).Magnitude <= 12 and displayedName == selected.name
-						and displayedKg and math.abs(displayedKg - selected.kg) <= 0.11 then
+					local associated = directlyReferencesAnimal(item, dropped)
+						or containsAnimalName(item.ObjectText, selected.name)
+					if item.Enabled and associated and point
+						and distanceToAnimal(point, dropped) <= 12 then
 						table.insert(candidates, item)
 					end
 				end
 			end
 			if #candidates > 1 then ambiguousPrompt = true; return true end
 			return candidates[1]
-		end, 1)
+		end, 5)
 		if not valid() then return nil end
 		if ambiguousPrompt then return "Multiple pickup prompts; stopped." end
-		if not prompt then return "Matching StealPrompt not found; return cancelled." end
+		if not prompt then
+			return string.format("No matching Steal prompt: %d found, %d enabled. Return cancelled.",
+				namedPrompts, enabledPrompts)
+		end
 		status.Text = "AFK: picking up " .. selected.name
 		local point = spatialPosition(prompt.Parent)
 		if not point then return "Pickup prompt removed." end
-		moveRoot(character, root, point + Vector3.new(0, 2.5, 0))
+		pickupPoint = point + Vector3.new(0, 2.5, 0)
+		moveRoot(character, root, pickupPoint)
 		heldPrompt = prompt
 		-- Standard prompt input; use the existing executor helper if it is available.
 		if type(fireproximityprompt) == "function" then
@@ -459,6 +525,7 @@ function afk.start()
 		local confirmed = waitFor(function() return sameHeld(readHeld(), selected) end, 2)
 		if not valid() then return nil end
 		if not confirmed then return "Pickup not confirmed; did not teleport to Spawn." end
+		if pickupKeeper then pickupKeeper:Disconnect(); pickupKeeper = nil end
 		-- No yield between confirmation and return.
 		moveRoot(character, root, LOCATIONS[1].position + Vector3.new(0, TELEPORT_HEIGHT_OFFSET, 0))
 		-- Keep collisions on after success so the returned character cannot fall through the floor.
