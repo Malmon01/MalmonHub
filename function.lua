@@ -1,309 +1,495 @@
--- V2 read-only game-state probe. No movement, pickup, remote calls, or hooks.
--- Run once, then pick up a cheap animal and let a guardian hit you.
--- Press Copy log afterwards. Close stops the probe and removes its local GUI.
+-- Movement Panel + AFK Egg beta, based on the supplied version-1437 game log.
+-- One manually selected animal per run. No automatic egg selection or remote guessing.
 local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 local CollectionService = game:GetService("CollectionService")
-local HttpService = game:GetService("HttpService")
 local player = Players.LocalPlayer
-local started = os.clock()
-local running = true
-local lines = {}
-local refs = setmetatable({}, {__mode = "k"})
-local nextRef = 0
-local connections = {}
-local remembered = nil
-local trackedKeys = {
-	"Carrying", "CarryingZone", "CarryingKg", "CarryingSizeMult",
-	"CarryingRarity", "CarryingBracket", "CarryCount", "BeingChased",
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- Add more destinations here. Coordinates below come from the attached image.
+local LOCATIONS = {
+	{ name = "Spawn Point", position = Vector3.new(-743.648132, 37.7241478, 124.247498) },
 }
+local TELEPORT_HEIGHT_OFFSET = 3
+local JUMP_SPEED = 50
+local infiniteJump = false
+local noclip = false
+local originalCollision = {}
+local connections = {}
+local cleaned = false
+local afk = nil
+local TWEEN_SPEED = 16 -- studs/second
+local BOSS_ZONE = "Zone12"
+
+-- Replacing a previous panel also disconnects its movement handlers.
+local previous = playerGui:FindFirstChild("MovementPanel")
+if previous then previous:Destroy() end
+for _, item in ipairs(playerGui:GetChildren()) do
+	if item:GetAttribute("AfkEggMovementPanel") then item:Destroy() end
+end
 
 local gui = Instance.new("ScreenGui")
--- This experience's CarryController allows this name while carrying.
+-- The observed CarryController keeps this GUI name enabled while carrying.
 gui.Name = "ProximityPrompts"
+gui:SetAttribute("AfkEggMovementPanel", true)
 gui.ResetOnSpawn = false
-gui.DisplayOrder = 1000
-gui:SetAttribute("AfkEggProbe", true)
-for _, old in ipairs(player:WaitForChild("PlayerGui"):GetChildren()) do
-	if old:GetAttribute("AfkEggProbe") then old:Destroy() end
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = playerGui
+
+local function round(object, radius)
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, radius)
+	corner.Parent = object
 end
-gui.Parent = player:WaitForChild("PlayerGui")
-local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0.72, 0, 0.5, 0)
-frame.Position = UDim2.new(0.14, 0, 0.16, 0)
-frame.BackgroundColor3 = Color3.fromRGB(24, 28, 35)
-frame.Parent = gui
-local box = Instance.new("TextBox")
-box.Position = UDim2.fromOffset(8, 46)
-box.Size = UDim2.new(1, -16, 1, -54)
-box.BackgroundColor3 = Color3.fromRGB(15, 18, 24)
-box.TextColor3 = Color3.new(1, 1, 1)
-box.TextSize = 12
-box.Font = Enum.Font.Code
-box.TextXAlignment = Enum.TextXAlignment.Left
-box.TextYAlignment = Enum.TextYAlignment.Top
-box.TextWrapped = true
-box.MultiLine = true
-box.ClearTextOnFocus = false
-box.TextEditable = false
-box.Text = "AFK Egg Probe V2: waiting for pickup"
-box.Parent = frame
-local function button(label, x)
+
+local panel = Instance.new("Frame")
+panel.Size = UDim2.fromOffset(280, 268 + #LOCATIONS * 40)
+panel.Position = UDim2.new(0, 12, 0.5, -(268 + #LOCATIONS * 40) / 2)
+panel.BackgroundColor3 = Color3.fromRGB(25, 28, 36)
+panel.Parent = gui
+round(panel, 12)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -20, 0, 42)
+title.Position = UDim2.fromOffset(10, 0)
+title.BackgroundTransparency = 1
+title.Text = "Movement Panel"
+title.TextColor3 = Color3.new(1, 1, 1)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 18
+title.Parent = panel
+
+local function button(text, parent, y)
 	local b = Instance.new("TextButton")
-	b.Position = UDim2.fromOffset(x, 6)
-	b.Size = UDim2.fromOffset(110, 32)
-	b.Text = label
-	b.TextSize = 14
+	b.Size = UDim2.new(1, -24, 0, 34)
+	b.Position = UDim2.fromOffset(12, y)
+	b.BackgroundColor3 = Color3.fromRGB(55, 61, 77)
 	b.TextColor3 = Color3.new(1, 1, 1)
-	b.BackgroundColor3 = Color3.fromRGB(45, 91, 120)
-	b.Parent = frame
+	b.TextSize = 14
+	b.Font = Enum.Font.GothamMedium
+	b.Text = text
+	b.Parent = parent
+	round(b, 8)
 	return b
 end
-local copy = button("Copy log", 8)
-local hide = button("Hide log", 126)
-local close = button("Close", 244)
-local function log(message)
-	if not running then return end
-	table.insert(lines, string.format("%.2f %s", os.clock() - started, message))
-	if #lines > 500 then table.remove(lines, 1) end
-	box.Text = table.concat(lines, "\n")
+
+local function connect(signal, callback)
+	local connection = signal:Connect(callback)
+	table.insert(connections, connection)
+	return connection
 end
-local function encode(value)
-	local ok, result = pcall(function() return HttpService:JSONEncode(value) end)
-	return ok and result or tostring(value)
-end
-local function carryAttributes()
-	local data = {}
-	for _, key in ipairs(trackedKeys) do data[key] = player:GetAttribute(key) end
-	return data
-end
-local function remember()
-	if player:GetAttribute("Carrying") then remembered = carryAttributes() end
-end
-local function path(instance)
-	if not instance then return "nil" end
-	local ok, value = pcall(function() return instance:GetFullName() end)
-	return ok and value or "removed"
-end
-local function id(instance)
-	if not refs[instance] then nextRef += 1; refs[instance] = nextRef end
-	return "ref" .. refs[instance]
-end
-local function attributes(instance)
-	local ok, value = pcall(function() return HttpService:JSONEncode(instance:GetAttributes()) end)
-	return ok and value or "[attributes unavailable]"
-end
-local function position(model)
-	if model:IsA("BasePart") then return model.Position end
-	if model:IsA("Model") and model:FindFirstChildWhichIsA("BasePart", true) then
-		return model:GetPivot().Position
+
+local function restoreCollision()
+	for part, value in pairs(originalCollision) do
+		if part.Parent then part.CanCollide = value end
 	end
-	return nil
+	table.clear(originalCollision)
 end
-local function describe(model)
-	local p = position(model)
-	log(id(model) .. " " .. path(model) .. " pos=" .. tostring(p) .. " attrs=" .. attributes(model))
-	for _, item in ipairs(model:GetDescendants()) do
-		if item:IsA("ProximityPrompt") then
-			log(" PROMPT " .. path(item) .. " action=" .. item.ActionText
-				.. " object=" .. item.ObjectText .. " enabled=" .. tostring(item.Enabled)
-				.. " hold=" .. item.HoldDuration .. " distance=" .. item.MaxActivationDistance)
+
+local function paintToggle(b, label, enabled)
+	b.Text = label .. (enabled and ": ON" or ": OFF")
+	b.BackgroundColor3 = enabled and Color3.fromRGB(28, 132, 92)
+		or Color3.fromRGB(55, 61, 77)
+end
+
+local jumpButton = button("Infinite Jump: OFF", panel, 46)
+local noclipButton = button("Noclip: OFF", panel, 86)
+connect(jumpButton.Activated, function()
+	if afk and afk.active then return end
+	infiniteJump = not infiniteJump
+	paintToggle(jumpButton, "Infinite Jump", infiniteJump)
+end)
+connect(noclipButton.Activated, function()
+	if afk and afk.active then return end
+	noclip = not noclip
+	if not noclip then restoreCollision() end
+	paintToggle(noclipButton, "Noclip", noclip)
+end)
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, -24, 0, 30)
+status.Position = UDim2.fromOffset(12, 168 + #LOCATIONS * 40)
+status.BackgroundTransparency = 1
+status.Text = "Ready"
+status.TextColor3 = Color3.fromRGB(195, 202, 220)
+status.TextSize = 12
+status.TextWrapped = true
+status.Font = Enum.Font.Gotham
+status.Parent = panel
+
+for index, destination in ipairs(LOCATIONS) do
+	local teleportButton = button("Teleport: " .. destination.name, panel, 126 + (index - 1) * 40)
+	connect(teleportButton.Activated, function()
+		if afk and afk.active then afk.stop("AFK cancelled by manual teleport") end
+		local character = player.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if not root or not humanoid or humanoid.Health <= 0 then
+			status.Text = "Wait for your character to spawn."
+			return
+		end
+		if humanoid.SeatPart then
+			status.Text = "Leave your seat before teleporting."
+			return
+		end
+		local target = destination.position + Vector3.new(0, TELEPORT_HEIGHT_OFFSET, 0)
+		-- Translate the whole model so its root reaches the target; preserve orientation.
+		character:PivotTo(character:GetPivot() + (target - root.Position))
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		status.Text = "Teleported to " .. destination.name
+	end)
+end
+
+local afkButton = button("AFK Egg: OFF", panel, 126 + #LOCATIONS * 40)
+local hideButton = button("Hide menu", panel, 204 + #LOCATIONS * 40)
+local showButton = button("Show menu", gui, 12)
+showButton.Size = UDim2.fromOffset(120, 34)
+showButton.Visible = false
+connect(hideButton.Activated, function()
+	panel.Visible = false
+	showButton.Visible = true
+end)
+connect(showButton.Activated, function()
+	panel.Visible = true
+	showButton.Visible = false
+end)
+
+local lastJump = 0
+connect(UserInputService.JumpRequest, function()
+	if not infiniteJump or UserInputService:GetFocusedTextBox() then return end
+	local now = os.clock()
+	if now - lastJump < 0.12 then return end
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if not humanoid or not root or humanoid.Health <= 0 or humanoid.SeatPart then return end
+	lastJump = now
+	humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+	local velocity = root.AssemblyLinearVelocity
+	root.AssemblyLinearVelocity = Vector3.new(velocity.X, JUMP_SPEED, velocity.Z)
+end)
+
+connect(RunService.PreSimulation, function()
+	if not noclip then return end
+	local character = player.Character
+	if not character then return end
+	for _, part in ipairs(character:GetDescendants()) do
+		if part:IsA("BasePart") then
+			if originalCollision[part] == nil then
+				originalCollision[part] = part.CanCollide
+			end
+			part.CanCollide = false
 		end
 	end
-end
-local promptIndex = {}
-for _, item in ipairs(workspace:GetDescendants()) do
-	if item:IsA("ProximityPrompt") then promptIndex[item] = true end
-end
-table.insert(connections, workspace.DescendantAdded:Connect(function(item)
-	if item:IsA("ProximityPrompt") then promptIndex[item] = true end
-end))
-table.insert(connections, workspace.DescendantRemoving:Connect(function(item)
-	promptIndex[item] = nil
-end))
-local function promptPosition(prompt)
-	local parent = prompt.Parent
-	if not parent then return nil end
-	if parent:IsA("Attachment") then return parent.WorldPosition end
-	return position(parent)
-end
-local function matchesRemembered(model)
-	if not remembered then return false end
-	local name = model:GetAttribute("AnimalName") or model.Name
-	if name ~= remembered.Carrying then return false end
-	local mappings = {
-		ZoneId = "CarryingZone", WeightKg = "CarryingKg", SizeMult = "CarryingSizeMult",
-		Rarity = "CarryingRarity", WeightBracket = "CarryingBracket",
+end)
+
+connect(player.CharacterRemoving, function()
+	if afk then afk.stop("AFK stopped: character removed") end
+	restoreCollision()
+	lastJump = 0
+end)
+
+-- AFK implementation: the game log supplies Carrying attributes, Ragdolled,
+-- AnimalPickups and a separate PromptAnchor.StealPrompt. No remote names/args guessed.
+local function readHeld()
+	local name = player:GetAttribute("Carrying")
+	if type(name) ~= "string" or name == "" then return nil end
+	return {
+		name = name,
+		zone = player:GetAttribute("CarryingZone"),
+		kg = player:GetAttribute("CarryingKg"),
+		size = player:GetAttribute("CarryingSizeMult"),
+		rarity = player:GetAttribute("CarryingRarity"),
+		bracket = player:GetAttribute("CarryingBracket"),
 	}
-	for modelKey, playerKey in pairs(mappings) do
-		local expected = remembered[playerKey]
-		if expected ~= nil and model:GetAttribute(modelKey) ~= expected then return false end
+end
+
+local function sameValue(a, b)
+	if type(a) == "number" and type(b) == "number" then return math.abs(a - b) <= 0.001 end
+	return a == b
+end
+
+local function sameHeld(a, b)
+	if not a or not b then return false end
+	for _, key in ipairs({"name", "zone", "kg", "size", "rarity", "bracket"}) do
+		if not sameValue(a[key], b[key]) then return false end
 	end
 	return true
 end
-local function snapshot(reason)
-	remember()
+
+local function modelMatches(model, held)
+	local keys = {AnimalName = "name", ZoneId = "zone", WeightKg = "kg",
+		SizeMult = "size", Rarity = "rarity", WeightBracket = "bracket"}
+	for attribute, key in pairs(keys) do
+		local actual = model:GetAttribute(attribute)
+		if attribute == "AnimalName" and actual == nil then actual = model.Name end
+		if not sameValue(actual, held[key]) then return false end
+	end
+	return true
+end
+
+local function spatialPosition(instance)
+	if instance:IsA("Attachment") then return instance.WorldPosition end
+	if instance:IsA("BasePart") then return instance.Position end
+	if instance:IsA("Model") and instance:FindFirstChildWhichIsA("BasePart", true) then
+		return instance:GetPivot().Position
+	end
+	return nil
+end
+
+local function allPickups()
+	local result, seen = {}, {}
+	local function add(item)
+		if item:IsA("Model") and not seen[item] and item:IsDescendantOf(workspace) then
+			seen[item] = true
+			table.insert(result, item)
+		end
+	end
+	for _, item in ipairs(CollectionService:GetTagged("AnimalPickup")) do add(item) end
+	local folder = workspace:FindFirstChild("AnimalPickups")
+	if folder then for _, item in ipairs(folder:GetChildren()) do add(item) end end
+	return result
+end
+
+local prompts = {}
+for _, item in ipairs(workspace:GetDescendants()) do
+	if item:IsA("ProximityPrompt") then prompts[item] = true end
+end
+connect(workspace.DescendantAdded, function(item)
+	if item:IsA("ProximityPrompt") then prompts[item] = true end
+end)
+connect(workspace.DescendantRemoving, function(item) prompts[item] = nil end)
+
+local function bossPosition()
+	local build = workspace:FindFirstChild("Build")
+	local zones = build and build:FindFirstChild("ZoneBuilds")
+	local zone = zones and zones:FindFirstChild(BOSS_ZONE)
+	local boss = zone and zone:FindFirstChild("ZoneBoss")
+	if not boss then return nil end
+	local root = boss:FindFirstChild("HumanoidRootPart", true)
+	if root and root:IsA("BasePart") then return root.Position end
+	return spatialPosition(boss)
+end
+
+local function moveRoot(character, root, position)
+	character:PivotTo(character:GetPivot() + (position - root.Position))
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+end
+
+local generation, tween, heldPrompt = 0, nil, nil
+local savedMovement = nil
+afk = {active = false}
+function afk.stop(message)
+	local wasActive = afk.active
+	afk.active = false
+	generation = generation + 1
+	if tween then tween:Cancel(); tween = nil end
+	if heldPrompt then pcall(function() heldPrompt:InputHoldEnd() end); heldPrompt = nil end
+	if wasActive and savedMovement and not cleaned then
+		infiniteJump, noclip = savedMovement.jump, savedMovement.noclip
+		paintToggle(jumpButton, "Infinite Jump", infiniteJump)
+		paintToggle(noclipButton, "Noclip", noclip)
+	end
+	savedMovement = nil
+	if not cleaned then
+		paintToggle(afkButton, "AFK Egg", false)
+		if message then status.Text = message end
+	end
+end
+
+function afk.start()
+	if afk.active or cleaned then return end
 	local character = player.Character
 	local root = character and character:FindFirstChild("HumanoidRootPart")
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-	log("SNAP " .. reason .. " Carrying=" .. tostring(player:GetAttribute("Carrying"))
-		.. " BeingChased=" .. tostring(player:GetAttribute("BeingChased"))
-		.. " carryAttrs=" .. encode(carryAttributes()) .. " remembered=" .. encode(remembered))
-	if not root then return end
-	log("CHAR attrs=" .. attributes(character) .. " pos=" .. tostring(root.Position)
-		.. " velocity=" .. tostring(root.AssemblyLinearVelocity)
-		.. " state=" .. tostring(humanoid and humanoid:GetState()))
-	local nearby, matching, seen = {}, {}, {}
-	local function add(model)
-		if seen[model] then return end
-		seen[model] = true
-		local p = position(model)
-		if matchesRemembered(model) then table.insert(matching, model) end
-		if p and (p - root.Position).Magnitude <= 35 then
-			table.insert(nearby, {model = model, distance = (p - root.Position).Magnitude})
+	if not root or not humanoid or humanoid.Health <= 0 or humanoid.SeatPart then
+		status.Text = "Spawn and leave your seat first."
+		return
+	end
+	if character:GetAttribute("Ragdolled") then status.Text = "Wait for ragdoll recovery."; return end
+	if not bossPosition() then
+		status.Text = "Zone12 boss not loaded. Move to the final stage first."
+		return
+	end
+	afk.active = true
+	generation = generation + 1
+	local token = generation
+	savedMovement = {jump = infiniteJump, noclip = noclip}
+	infiniteJump, noclip = false, false
+	restoreCollision()
+	paintToggle(jumpButton, "Infinite Jump", false)
+	paintToggle(noclipButton, "Noclip", false)
+	paintToggle(afkButton, "AFK Egg", true)
+	local function current()
+		return not cleaned and afk.active and generation == token
+	end
+	local function valid()
+		return current() and player.Character == character and root.Parent
+			and humanoid.Parent and humanoid.Health > 0
+	end
+	local function waitFor(predicate, seconds)
+		local deadline = os.clock() + seconds
+		while valid() do
+			local result = predicate()
+			if result then return result end
+			if os.clock() >= deadline then return nil end
+			RunService.Heartbeat:Wait()
 		end
+		return nil
 	end
-	for _, model in ipairs(CollectionService:GetTagged("AnimalPickup")) do add(model) end
-	local folder = workspace:FindFirstChild("AnimalPickups")
-	if folder then for _, model in ipairs(folder:GetChildren()) do add(model) end end
-	table.sort(nearby, function(a, b) return a.distance < b.distance end)
-	log("Nearby AnimalPickup count=" .. #nearby)
-	for index = 1, math.min(#nearby, 6) do describe(nearby[index].model) end
-	log("GLOBAL matching fingerprint count=" .. #matching .. " (same attributes do not prove unique identity)")
-	for index = 1, math.min(#matching, 8) do
-		log("MATCH " .. index)
-		describe(matching[index])
-	end
-	local points = {root.Position}
-	for _, model in ipairs(matching) do
-		local p = position(model)
-		if p then table.insert(points, p) end
-	end
-	local promptCount = 0
-	for prompt in pairs(promptIndex) do
-		local p = promptPosition(prompt)
-		local near = false
-		if p then
-			for _, point in ipairs(points) do
-				if (p - point).Magnitude <= 24 then near = true; break end
+	local function run()
+		status.Text = "AFK: waiting for your selected animal"
+		local selected = waitFor(readHeld, 300)
+		if not valid() then return nil end
+		if not selected then return "No pickup within 5 minutes." end
+		if player:GetAttribute("CarryCount") ~= 1 or not selected.zone or not selected.kg
+			or not selected.size or not selected.rarity or selected.bracket == nil then
+			return "Need exactly one animal with complete carry attributes."
+		end
+		local baseline = {}
+		for _, item in ipairs(allPickups()) do baseline[item] = true end
+		local lastHeldPosition = root.Position
+		local ragdollTime, dropTime = nil, nil
+		local travelDeadline = os.clock() + 90
+		local lastTweenAt = 0
+		status.Text = "AFK: moving toward Zone12 guardian"
+		while valid() do
+			local now = os.clock()
+			local held = readHeld()
+			local ragdolled = character:GetAttribute("Ragdolled") == true
+			if held and not sameHeld(held, selected) then return "Held animal changed; stopped." end
+			if ragdolled and not ragdollTime then ragdollTime = now end
+			if not held and not dropTime then dropTime = now end
+			if not ragdolled and held then lastHeldPosition = root.Position end
+			if ragdollTime and dropTime and math.abs(ragdollTime - dropTime) <= 1 then break end
+			if (dropTime and now - dropTime > 1) or (ragdollTime and now - ragdollTime > 1) then
+				return "No matching ragdoll/drop event; stopped."
 			end
-		end
-		if near then
-			promptCount += 1
-			if promptCount <= 16 then
-				log("WORLD PROMPT " .. path(prompt) .. " pos=" .. tostring(p)
-					.. " action=" .. prompt.ActionText .. " object=" .. prompt.ObjectText
-					.. " enabled=" .. tostring(prompt.Enabled) .. " hold=" .. prompt.HoldDuration
-					.. " attrs=" .. attributes(prompt) .. " parentAttrs=" .. attributes(prompt.Parent))
+			if now >= travelDeadline then return "Guardian timeout; stopped." end
+			if ragdolled or not held then
+				if tween then tween:Cancel(); tween = nil end
+			elseif now - lastTweenAt >= 0.25 then
+				local boss = bossPosition()
+				if not boss then return "Guardian streamed out; stopped." end
+				if tween then tween:Cancel(); tween = nil end
+				local target = Vector3.new(boss.X, root.Position.Y, boss.Z)
+				local delta = target - root.Position
+				local distance = delta.Magnitude
+				if distance > 2 then
+					local step = math.min(distance, TWEEN_SPEED * 0.25)
+					tween = TweenService:Create(root, TweenInfo.new(0.25, Enum.EasingStyle.Linear), {
+						CFrame = root.CFrame + delta.Unit * step,
+					})
+					tween:Play()
+				end
+				lastTweenAt = now
 			end
+			RunService.Heartbeat:Wait()
 		end
-	end
-	log("Nearby world prompts=" .. promptCount)
-	for _, item in ipairs(character:GetDescendants()) do
-		if item:IsA("ObjectValue") then
-			log(" CHAR REF " .. path(item) .. " -> " .. path(item.Value))
-		elseif item:IsA("WeldConstraint") or item:IsA("JointInstance") then
-			local a, b = item.Part0, item.Part1
-			if (a and not a:IsDescendantOf(character)) or (b and not b:IsDescendantOf(character)) then
-				log(" EXTERNAL JOINT " .. path(item) .. " " .. path(a) .. " -> " .. path(b))
+		if not valid() then return nil end
+		if tween then tween:Cancel(); tween = nil end
+		status.Text = "AFK: locating the dropped animal"
+		local ambiguous = false
+		local dropped = waitFor(function()
+			local candidates = {}
+			for _, item in ipairs(allPickups()) do
+				local p = spatialPosition(item)
+				if not baseline[item] and p and modelMatches(item, selected)
+					and (p - lastHeldPosition).Magnitude <= 25 then
+					table.insert(candidates, item)
+				end
 			end
+			if #candidates > 1 then ambiguous = true; return true end
+			return candidates[1]
+		end, 2)
+		if not valid() then return nil end
+		if ambiguous then return "Multiple matching animals; stopped without picking one." end
+		if not dropped then return "Dropped animal not found; return cancelled." end
+		local droppedPosition = spatialPosition(dropped)
+		if not droppedPosition then return "Animal position unavailable." end
+		moveRoot(character, root, droppedPosition + Vector3.new(0, 2.5, 0))
+		local ambiguousPrompt = false
+		local prompt = waitFor(function()
+			local candidates = {}
+			local p = spatialPosition(dropped)
+			if not p then return nil end
+			for item in pairs(prompts) do
+				if item.Parent and item.Enabled and item.Name == "StealPrompt" then
+					local point = spatialPosition(item.Parent)
+					local text = item.ObjectText:gsub("<[^>]+>", "")
+					local displayedName = text:match("%]%s*(.-)%s*$")
+					local kgText = text:match("%[([%d%.,]+)%s*[Kk][Gg]%]")
+					local displayedKg = kgText and tonumber((kgText:gsub(",", "")))
+					if point and (point - p).Magnitude <= 12 and displayedName == selected.name
+						and displayedKg and math.abs(displayedKg - selected.kg) <= 0.11 then
+						table.insert(candidates, item)
+					end
+				end
+			end
+			if #candidates > 1 then ambiguousPrompt = true; return true end
+			return candidates[1]
+		end, 1)
+		if not valid() then return nil end
+		if ambiguousPrompt then return "Multiple pickup prompts; stopped." end
+		if not prompt then return "Matching StealPrompt not found; return cancelled." end
+		status.Text = "AFK: picking up " .. selected.name
+		local point = spatialPosition(prompt.Parent)
+		if not point then return "Pickup prompt removed." end
+		moveRoot(character, root, point + Vector3.new(0, 2.5, 0))
+		heldPrompt = prompt
+		-- Standard prompt input; use the existing executor helper if it is available.
+		if type(fireproximityprompt) == "function" then
+			local ok, err = pcall(fireproximityprompt, prompt, prompt.HoldDuration)
+			if not valid() then return nil end
+			if not ok then return "Prompt failed: " .. tostring(err) end
+		else
+			prompt:InputHoldBegin()
+			local began = os.clock()
+			waitFor(function() return os.clock() - began >= prompt.HoldDuration + 0.05 end,
+				prompt.HoldDuration + 0.3)
+			if not valid() then return nil end
+			pcall(function() prompt:InputHoldEnd() end)
 		end
+		heldPrompt = nil
+		if not valid() then return nil end
+		local confirmed = waitFor(function() return sameHeld(readHeld(), selected) end, 2)
+		if not valid() then return nil end
+		if not confirmed then return "Pickup not confirmed; did not teleport to Spawn." end
+		-- No yield between confirmation and return.
+		moveRoot(character, root, LOCATIONS[1].position + Vector3.new(0, TELEPORT_HEIGHT_OFFSET, 0))
+		-- Keep collisions on after success so the returned character cannot fall through the floor.
+		if savedMovement then savedMovement.noclip = false end
+		return "AFK finished: picked up and returned to Spawn."
 	end
+	task.spawn(function()
+		local ok, result = xpcall(run, debug.traceback)
+		if not current() then return end
+		afk.stop(ok and (result or "AFK stopped.") or "AFK error; stopped. See console.")
+		if not ok then warn(result) end
+	end)
 end
 
-copy.Activated:Connect(function()
-	local text = table.concat(lines, "\n")
-	if type(setclipboard) == "function" then
-		local ok = pcall(setclipboard, text)
-		copy.Text = ok and "Copied" or "Copy failed"
-	else
-		box.TextEditable = true
-		box:CaptureFocus()
-		box.CursorPosition = #box.Text + 1
-		box.SelectionStart = 1
-		copy.Text = "Select / Copy"
-	end
+connect(afkButton.Activated, function()
+	if afk.active then afk.stop("AFK cancelled.") else afk.start() end
 end)
-hide.Activated:Connect(function()
-	box.Visible = not box.Visible
-	frame.Size = box.Visible and UDim2.new(0.72, 0, 0.5, 0) or UDim2.new(0.72, 0, 0, 44)
-	hide.Text = box.Visible and "Hide log" or "Show log"
-end)
-close.Activated:Connect(function() running = false; gui:Destroy() end)
-local function stopCapture()
-	running = false
+
+local function cleanup()
+	if cleaned then return end
+	cleaned = true
+	if afk then afk.stop() end
+	infiniteJump = false
+	noclip = false
 	for _, connection in ipairs(connections) do connection:Disconnect() end
-	table.clear(connections)
+	restoreCollision()
 end
-gui.Destroying:Connect(stopCapture)
-
-log("START PROBE V2 placeId=" .. game.PlaceId .. " version=" .. game.PlaceVersion)
-local controllers = player:WaitForChild("PlayerScripts"):FindFirstChild("Client")
-controllers = controllers and controllers:FindFirstChild("Controllers")
-if controllers then
-	local names = {}
-	for _, item in ipairs(controllers:GetChildren()) do table.insert(names, item.Name) end
-	table.sort(names)
-	log("CONTROLLERS " .. table.concat(names, ","))
+gui.Destroying:Connect(cleanup)
+if typeof(script) == "Instance" then
+	script.Destroying:Connect(function()
+		cleanup()
+		gui:Destroy()
+	end)
 end
-local remoteNames = {}
-for _, item in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
-	if item:IsA("RemoteEvent") or item:IsA("RemoteFunction") then
-		local name = item.Name:lower()
-		if name:find("animal") or name:find("carry") or name:find("drop")
-			or name:find("bonk") or name:find("guard") or name:find("chase") then
-			table.insert(remoteNames, path(item))
-		end
-	end
-end
-table.sort(remoteNames)
-log("RELEVANT REMOTE NAMES ONLY " .. table.concat(remoteNames, ","))
-snapshot("initial")
-local latestCarrying = player:GetAttribute("Carrying")
-table.insert(connections, player:GetAttributeChangedSignal("Carrying"):Connect(function()
-	local before = latestCarrying
-	latestCarrying = player:GetAttribute("Carrying")
-	remember()
-	local prefix = "EVENT Carrying " .. tostring(before) .. " -> " .. tostring(latestCarrying)
-	log(prefix)
-	for _, delay in ipairs({0, 0.15, 0.5, 1.5}) do
-		task.delay(delay, function()
-			if not running then return end
-			local ok, err = pcall(snapshot, prefix .. " +" .. delay)
-			if not ok then log("PROBE ERROR " .. tostring(err)) end
-		end)
-	end
-end))
-local build = workspace:FindFirstChild("Build")
-local zones = build and build:FindFirstChild("ZoneBuilds")
-local zone = zones and zones:FindFirstChild("Zone12")
-local boss = zone and zone:FindFirstChild("ZoneBoss")
-log("ZONE12 BOSS " .. path(boss) .. " pos=" .. tostring(boss and position(boss)))
-task.spawn(function()
-	local previousCarrying = player:GetAttribute("Carrying")
-	local lastSnapshot = os.clock()
-	local lastSpeed = 0
-	while running and os.clock() - started < 90 do
-		task.wait(0.1)
-		if not running then break end
-		local carrying = player:GetAttribute("Carrying")
-		local character = player.Character
-		local root = character and character:FindFirstChild("HumanoidRootPart")
-		local speed = root and root.AssemblyLinearVelocity.Magnitude or 0
-		local reason
-		remember()
-		if carrying and os.clock() - lastSnapshot >= 5 then
-			reason = "holding sample"
-		end
-		if reason then
-			local ok, err = pcall(snapshot, reason)
-			if not ok then log("PROBE ERROR " .. tostring(err)) end
-			lastSnapshot = os.clock()
-		end
-		previousCarrying = carrying
-		lastSpeed = speed
-	end
-	if running then
-		log("STOP: 90-second capture finished. Copy log is ready.")
-		stopCapture()
-	end
-end)
