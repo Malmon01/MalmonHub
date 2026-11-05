@@ -1,4 +1,4 @@
--- Movement Panel v4: draggable UI, separate destinations, income-filtered auto pickup.
+-- Movement Panel v5: ground-following noclip; blank threshold = manual pickup.
 -- Reads displayed income (/s) from animal labels; no guessed income or remote arguments.
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -8,20 +8,14 @@ local CollectionService = game:GetService("CollectionService")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
--- Add more destinations here. Coordinates below come from the attached image.
-local LOCATIONS = {
-	{ name = "New Point", position = Vector3.new(-4684.80176, 2.72430563, -1.22741687) },
-}
--- AFK always returns to the ORIGINAL saved point, independently of Teleport.
+-- Original successful AFK return point. There is no standalone Teleport button.
 local AFK_RETURN_POSITION = Vector3.new(-743.648132, 37.7241478, 124.247498)
-local DEFAULT_MIN_INCOME = "1t" -- Editable default; the UI also accepts 1m, 100b, 1T, etc.
-local TELEPORT_HEIGHT_OFFSET = 0 -- The new screenshot already gives the character's root height.
-local AFK_RETURN_HEIGHT_OFFSET = 3 -- Preserve the successful v3 AFK return height.
+local DEFAULT_MIN_INCOME = "" -- Blank: pick up yourself. Example "1t": automatic income filter.
+local AFK_RETURN_HEIGHT_OFFSET = 3
 local JUMP_SPEED = 50
 local infiniteJump = false
 local noclip = false
-local hoverRoot, hoverAttachment, hoverAlign, hoverY = nil, nil, nil, nil
-local hoverJumpUntil = 0
+local groundRoot, lastGroundCFrame, groundLostY = nil, nil, nil
 local originalCollision = {}
 local connections = {}
 local cleaned = false
@@ -34,6 +28,14 @@ local previous = playerGui:FindFirstChild("MovementPanel")
 if previous then previous:Destroy() end
 for _, item in ipairs(playerGui:GetChildren()) do
 	if item:GetAttribute("AfkEggMovementPanel") then item:Destroy() end
+end
+-- Remove only support objects created by earlier Movement Panel versions.
+local previousRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+if previousRoot then
+	for _, name in ipairs({"MovementPanelVerticalSupport", "MovementPanelHoverAttachment"}) do
+		local oldSupport = previousRoot:FindFirstChild(name)
+		if oldSupport then oldSupport:Destroy() end
+	end
 end
 
 local gui = Instance.new("ScreenGui")
@@ -51,8 +53,8 @@ local function round(object, radius)
 end
 
 local panel = Instance.new("Frame")
-panel.Size = UDim2.fromOffset(280, 340 + #LOCATIONS * 40)
-panel.Position = UDim2.new(0, 12, 0.5, -(340 + #LOCATIONS * 40) / 2)
+panel.Size = UDim2.fromOffset(280, 340)
+panel.Position = UDim2.new(0, 12, 0.5, -(340) / 2)
 panel.BackgroundColor3 = Color3.fromRGB(25, 28, 36)
 panel.Parent = gui
 round(panel, 12)
@@ -61,7 +63,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -20, 0, 42)
 title.Position = UDim2.fromOffset(10, 0)
 title.BackgroundTransparency = 1
-title.Text = "Movement Panel v4  |  drag"
+title.Text = "Movement Panel v5  |  drag"
 title.TextColor3 = Color3.new(1, 1, 1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 18
@@ -141,61 +143,55 @@ local function restoreCollision()
 	table.clear(originalCollision)
 end
 
-local function clearHover()
-	if hoverAlign then hoverAlign:Destroy() end
-	if hoverAttachment then hoverAttachment:Destroy() end
-	hoverRoot, hoverAttachment, hoverAlign, hoverY = nil, nil, nil, nil
-	hoverJumpUntil = 0
+-- Ground mode applies no levitation force and stores no fixed altitude.
+local function clearGroundTracking()
+	groundRoot, lastGroundCFrame, groundLostY = nil, nil, nil
 end
 
-local function ensureHover(root, targetY)
-	if hoverRoot ~= root or not hoverAlign or hoverAlign.Parent ~= root
-		or not hoverAttachment or hoverAttachment.Parent ~= root then
-		clearHover()
-		hoverRoot = root
-		hoverY = targetY or root.Position.Y
-		hoverAttachment = Instance.new("Attachment")
-		hoverAttachment.Name = "MovementPanelHoverAttachment"
-		hoverAttachment.Parent = root
-		hoverAlign = Instance.new("AlignPosition")
-		hoverAlign.Name = "MovementPanelVerticalSupport"
-		hoverAlign.Mode = Enum.PositionAlignmentMode.OneAttachment
-		hoverAlign.Attachment0 = hoverAttachment
-		hoverAlign.ApplyAtCenterOfMass = true
-		hoverAlign.RigidityEnabled = false
-		hoverAlign.ForceLimitMode = Enum.ForceLimitMode.PerAxis
-		hoverAlign.ForceRelativeTo = Enum.ActuatorRelativeTo.World
-		hoverAlign.MaxAxesForce = Vector3.new(0, 1000000000, 0)
-		hoverAlign.MaxVelocity = 100
-		hoverAlign.Responsiveness = 100
-		hoverAlign.Position = Vector3.new(root.Position.X, hoverY, root.Position.Z)
-		hoverAlign.Parent = root
-	elseif targetY then
-		hoverY = targetY
-		hoverJumpUntil = 0
+local function resetGroundTracking(root)
+	if noclip then
+		groundRoot = root
+		lastGroundCFrame, groundLostY = nil, nil
 	end
-	hoverAlign.Position = Vector3.new(root.Position.X, hoverY, root.Position.Z)
 end
 
-local function setNoclip(enabled, targetY)
+local function setNoclip(enabled)
 	noclip = enabled
 	if not enabled then
 		restoreCollision()
-		clearHover()
+		clearGroundTracking()
 		return
 	end
 	local character = player.Character
 	local root = character and character:FindFirstChild("HumanoidRootPart")
-	if root then ensureHover(root, targetY) end
+	if root and groundRoot ~= root then resetGroundTracking(root) end
 end
 
--- A deliberate teleport must move the hover target too; otherwise the old
--- support height would pull the character back toward its previous altitude.
-local function resetHoverHeight(root)
-	if noclip then
-		ensureHover(root, root.Position.Y)
-		hoverAlign.Enabled = true
+local function standingHeight(character, root, humanoid)
+	if character:GetAttribute("Ragdolled") == true then return root.Size.Y * 0.5 end
+	local height = humanoid.HipHeight + root.Size.Y * 0.5
+	if humanoid.RigType == Enum.HumanoidRigType.R6 then
+		local leg = character:FindFirstChild("Left Leg") or character:FindFirstChild("Right Leg")
+		if leg then height = height + leg.Size.Y end
 	end
+	return math.max(height, root.Size.Y * 0.5)
+end
+
+local function groundRaycast(character, root)
+	local excluded = {character}
+	for _, other in ipairs(Players:GetPlayers()) do
+		if other.Character and other.Character ~= character then table.insert(excluded, other.Character) end
+	end
+	for _, name in ipairs({"AnimalPickups", "FollowPetsLocal", "NewAnimals40"}) do
+		local folder = workspace:FindFirstChild(name)
+		if folder then table.insert(excluded, folder) end
+	end
+	local parameters = RaycastParams.new()
+	parameters.FilterType = Enum.RaycastFilterType.Exclude
+	parameters.FilterDescendantsInstances = excluded
+	parameters.IgnoreWater = true
+	parameters.RespectCanCollide = true
+	return workspace:Raycast(root.Position + Vector3.new(0, 2, 0), Vector3.new(0, -130, 0), parameters)
 end
 
 local function paintToggle(b, label, enabled)
@@ -219,7 +215,7 @@ end)
 
 local status = Instance.new("TextLabel")
 status.Size = UDim2.new(1, -24, 0, 42)
-status.Position = UDim2.fromOffset(12, 228 + #LOCATIONS * 40)
+status.Position = UDim2.fromOffset(12, 228)
 status.BackgroundTransparency = 1
 status.Text = "Ready"
 status.TextColor3 = Color3.fromRGB(195, 202, 220)
@@ -228,44 +224,17 @@ status.TextWrapped = true
 status.Font = Enum.Font.Gotham
 status.Parent = panel
 
-for index, destination in ipairs(LOCATIONS) do
-	local teleportButton = button("Teleport: " .. destination.name, panel, 126 + (index - 1) * 40)
-	connect(teleportButton.Activated, function()
-		if afk and afk.active then afk.stop("AFK cancelled by manual teleport") end
-		local character = player.Character
-		local root = character and character:FindFirstChild("HumanoidRootPart")
-		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-		if not root or not humanoid or humanoid.Health <= 0 then
-			status.Text = "Wait for your character to spawn."
-			return
-		end
-		if humanoid.SeatPart then
-			status.Text = "Leave your seat before teleporting."
-			return
-		end
-		local target = destination.position + Vector3.new(0, TELEPORT_HEIGHT_OFFSET, 0)
-		setNoclip(true, target.Y)
-		paintToggle(noclipButton, "Noclip", true)
-		-- Translate the whole model so its root reaches the target; preserve orientation.
-		character:PivotTo(character:GetPivot() + (target - root.Position))
-		root.AssemblyLinearVelocity = Vector3.zero
-		root.AssemblyAngularVelocity = Vector3.zero
-		resetHoverHeight(root)
-		status.Text = "Teleported to " .. destination.name
-	end)
-end
-
 local minimumLabel = Instance.new("TextLabel")
-minimumLabel.Position = UDim2.fromOffset(12, 126 + #LOCATIONS * 40)
+minimumLabel.Position = UDim2.fromOffset(12, 126)
 minimumLabel.Size = UDim2.new(1, -24, 0, 18)
 minimumLabel.BackgroundTransparency = 1
-minimumLabel.Text = "Minimum income /s  (1m, 100b, 1t)"
+minimumLabel.Text = "Income /s: blank = manual pickup"
 minimumLabel.TextColor3 = Color3.fromRGB(195, 202, 220)
 minimumLabel.TextSize = 12
 minimumLabel.Font = Enum.Font.Gotham
 minimumLabel.Parent = panel
 local minimumInput = Instance.new("TextBox")
-minimumInput.Position = UDim2.fromOffset(12, 146 + #LOCATIONS * 40)
+minimumInput.Position = UDim2.fromOffset(12, 146)
 minimumInput.Size = UDim2.new(1, -24, 0, 34)
 minimumInput.BackgroundColor3 = Color3.fromRGB(38, 44, 57)
 minimumInput.TextColor3 = Color3.new(1, 1, 1)
@@ -273,11 +242,11 @@ minimumInput.TextSize = 15
 minimumInput.Font = Enum.Font.GothamMedium
 minimumInput.ClearTextOnFocus = false
 minimumInput.Text = DEFAULT_MIN_INCOME
-minimumInput.PlaceholderText = "Example: 1t"
+minimumInput.PlaceholderText = "Blank = manual; auto example: 1t"
 minimumInput.Parent = panel
 round(minimumInput, 8)
-local afkButton = button("AFK Egg: OFF", panel, 186 + #LOCATIONS * 40)
-local hideButton = button("Hide menu", panel, 276 + #LOCATIONS * 40)
+local afkButton = button("AFK Egg: OFF", panel, 186)
+local hideButton = button("Hide menu", panel, 276)
 local showButton = button("Show menu", gui, 12)
 showButton.Size = UDim2.fromOffset(120, 34)
 showButton.Visible = false
@@ -293,7 +262,6 @@ end)
 local lastJump = 0
 connect(UserInputService.JumpRequest, function()
 	if UserInputService:GetFocusedTextBox() then return end
-	if noclip then hoverJumpUntil = os.clock() + 1 end
 	if not infiniteJump then return end
 	local now = os.clock()
 	if now - lastJump < 0.12 then return end
@@ -307,36 +275,42 @@ connect(UserInputService.JumpRequest, function()
 	root.AssemblyLinearVelocity = Vector3.new(velocity.X, JUMP_SPEED, velocity.Z)
 end)
 
-connect(RunService.PreSimulation, function()
+connect(RunService.PreSimulation, function(deltaTime)
 	if not noclip then return end
 	local character = player.Character
-	if not character then return end
-	local root = character:FindFirstChild("HumanoidRootPart")
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	if not root or not humanoid or humanoid.Health <= 0 then return end
-	ensureHover(root)
+	if groundRoot ~= root then resetGroundTracking(root) end
 	local velocity = root.AssemblyLinearVelocity
-	if os.clock() < hoverJumpUntil and (velocity.Y > 0
-		or humanoid:GetState() == Enum.HumanoidStateType.Jumping) then
-		-- Follow a requested jump upward, then support its new height at the apex.
-		hoverAlign.Enabled = false
-		hoverY = math.max(hoverY, root.Position.Y)
-	else
-		hoverJumpUntil = 0
-		hoverAlign.Enabled = true
-		hoverAlign.Position = Vector3.new(root.Position.X, hoverY, root.Position.Z)
-		if root.Position.Y < hoverY - 2 then
-			character:PivotTo(character:GetPivot() + Vector3.new(0, hoverY - root.Position.Y, 0))
-		end
-		if velocity.Y < 0 and root.Position.Y <= hoverY + 0.05 then
+	local hit = groundRaycast(character, root)
+	if hit and hit.Normal.Y >= 0.6 then
+		groundLostY = nil
+		local surfaceY = hit.Position.Y + standingHeight(character, root, humanoid)
+		local dt = math.clamp(deltaTime or 1 / 60, 0, 0.1)
+		local nextY = root.Position.Y + velocity.Y * dt - 0.5 * workspace.Gravity * dt * dt
+		local canLand = velocity.Y <= 0 and surfaceY <= root.Position.Y + 1.5
+		if canLand and (root.Position.Y <= surfaceY + 0.08 or nextY <= surfaceY) then
+			-- Correct only actual floor contact; above the floor, normal falling continues.
+			character:PivotTo(character:GetPivot() + Vector3.new(0, surfaceY - root.Position.Y, 0))
 			root.AssemblyLinearVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+			lastGroundCFrame = root.CFrame
+		end
+	elseif not hit then
+		if not groundLostY then groundLostY = root.Position.Y end
+		if lastGroundCFrame and (root.Position.Y < groundLostY - 24
+			or root.Position.Y < workspace.FallenPartsDestroyHeight + 32) then
+			local safe = lastGroundCFrame
+			character:PivotTo(character:GetPivot() + (safe.Position - root.Position))
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+			groundLostY = nil
+			status.Text = "No floor below: returned to last grounded position."
 		end
 	end
 	for _, part in ipairs(character:GetDescendants()) do
 		if part:IsA("BasePart") then
-			if originalCollision[part] == nil then
-				originalCollision[part] = part.CanCollide
-			end
+			if originalCollision[part] == nil then originalCollision[part] = part.CanCollide end
 			part.CanCollide = false
 		end
 	end
@@ -345,7 +319,7 @@ end)
 connect(player.CharacterRemoving, function()
 	if afk then afk.stop("AFK stopped: character removed") end
 	restoreCollision()
-	clearHover()
+	clearGroundTracking()
 	lastJump = 0
 end)
 
@@ -538,7 +512,7 @@ local function moveRoot(character, root, position)
 	character:PivotTo(character:GetPivot() + (position - root.Position))
 	root.AssemblyLinearVelocity = Vector3.zero
 	root.AssemblyAngularVelocity = Vector3.zero
-	resetHoverHeight(root)
+	resetGroundTracking(root)
 end
 
 local generation, tween, heldPrompt, pickupKeeper = 0, nil, nil, nil
@@ -567,12 +541,13 @@ end
 
 function afk.start()
 	if afk.active or cleaned then return end
-	local minimumIncome = parseMoney(minimumInput.Text)
-	if not minimumIncome or minimumIncome <= 0 then
+	local manualMode = minimumInput.Text:match("^%s*$") ~= nil
+	local minimumIncome = not manualMode and parseMoney(minimumInput.Text) or nil
+	if not manualMode and (not minimumIncome or minimumIncome <= 0) then
 		status.Text = "Invalid minimum. Try 1m, 100b, 1t or 10T."
 		return
 	end
-	if readHeld() then
+	if not manualMode and readHeld() then
 		status.Text = "Start empty-handed to verify the income threshold."
 		return
 	end
@@ -594,7 +569,7 @@ function afk.start()
 	local token = generation
 	savedMovement = {jump = infiniteJump, noclip = noclip}
 	infiniteJump = false
-	-- Preserve anti-fall support during the potentially long income-selection wait.
+	-- Preserve the user's ground-noclip setting while waiting for pickup.
 	setNoclip(savedMovement.noclip)
 	paintToggle(jumpButton, "Infinite Jump", false)
 	paintToggle(noclipButton, "Noclip", noclip)
@@ -693,49 +668,59 @@ function afk.start()
 	end
 
 	local function run()
-		local lastScan = -math.huge
-		status.Text = "AFK: waiting for income >= " .. minimumInput.Text .. "/s"
-		local choice = waitFor(function()
-			if os.clock() - lastScan < 0.5 then return nil end
-			lastScan = os.clock()
-			if readHeld() then return {unexpectedCarry = true} end
-			local best, readable, total = nil, 0, 0
-			for _, model in ipairs(allPickups()) do
-				local fingerprint = fingerprintFromModel(model)
-				local point = spatialPosition(model)
-				if fingerprint and point then
-					total = total + 1
-					local income = readDisplayedIncome(model)
-					if income then
-						readable = readable + 1
-						local distance = (point - root.Position).Magnitude
-						if income >= minimumIncome and (not best or income > best.income
-							or (income == best.income and distance < best.distance)) then
-							best = {model = model, fingerprint = fingerprint, income = income, distance = distance}
+		local selected
+		if manualMode then
+			status.Text = "AFK manual: waiting for you to pick up an animal"
+			selected = waitFor(readHeld, math.huge)
+			if not valid() then return nil end
+			if not selected then return "No held animal; stopped." end
+			setNoclip(false)
+			paintToggle(noclipButton, "Noclip", false)
+		else
+			local lastScan = -math.huge
+			status.Text = "AFK: waiting for income >= " .. minimumInput.Text .. "/s"
+			local choice = waitFor(function()
+				if os.clock() - lastScan < 0.5 then return nil end
+				lastScan = os.clock()
+				if readHeld() then return {unexpectedCarry = true} end
+				local best, readable, total = nil, 0, 0
+				for _, model in ipairs(allPickups()) do
+					local fingerprint = fingerprintFromModel(model)
+					local point = spatialPosition(model)
+					if fingerprint and point then
+						total = total + 1
+						local income = readDisplayedIncome(model)
+						if income then
+							readable = readable + 1
+							local distance = (point - root.Position).Magnitude
+							if income >= minimumIncome and (not best or income > best.income
+								or (income == best.income and distance < best.distance)) then
+								best = {model = model, fingerprint = fingerprint, income = income, distance = distance}
+							end
 						end
 					end
 				end
-			end
-			status.Text = string.format("AFK: waiting >= %s/s | income read %d/%d",
-				minimumInput.Text, readable, total)
-			return best
-		end, math.huge)
-		if not valid() then return nil end
-		if not choice or choice.unexpectedCarry then return "Manual pickup interrupted automatic selection." end
-		if not choice.model.Parent then return "Selected animal disappeared; restart AFK." end
-		local incomeNow = readDisplayedIncome(choice.model)
-		if not incomeNow or incomeNow < minimumIncome then return "Income changed or unavailable; stopped." end
-		local initialPosition = spatialPosition(choice.model)
-		if not initialPosition then return "Selected animal is not loaded." end
-		setNoclip(true, initialPosition.Y + 2.5)
-		paintToggle(noclipButton, "Noclip", true)
-		local firstPickup = pickupAnimal(choice.model, choice.fingerprint)
-		if not valid() then return nil end
-		if firstPickup ~= true then return firstPickup end
-		setNoclip(false)
-		paintToggle(noclipButton, "Noclip", false)
-		local selected = readHeld()
-		if not sameHeld(selected, choice.fingerprint) then return "Automatic pickup identity did not match." end
+				status.Text = string.format("AFK: waiting >= %s/s | income read %d/%d",
+					minimumInput.Text, readable, total)
+				return best
+			end, math.huge)
+			if not valid() then return nil end
+			if not choice or choice.unexpectedCarry then return "Manual pickup interrupted automatic selection." end
+			if not choice.model.Parent then return "Selected animal disappeared; restart AFK." end
+			local incomeNow = readDisplayedIncome(choice.model)
+			if not incomeNow or incomeNow < minimumIncome then return "Income changed or unavailable; stopped." end
+			local initialPosition = spatialPosition(choice.model)
+			if not initialPosition then return "Selected animal is not loaded." end
+			setNoclip(true)
+			paintToggle(noclipButton, "Noclip", true)
+			local firstPickup = pickupAnimal(choice.model, choice.fingerprint)
+			if not valid() then return nil end
+			if firstPickup ~= true then return firstPickup end
+			setNoclip(false)
+			paintToggle(noclipButton, "Noclip", false)
+			selected = readHeld()
+			if not sameHeld(selected, choice.fingerprint) then return "Automatic pickup identity did not match." end
+		end
 		if player:GetAttribute("CarryCount") ~= 1 or not selected.zone or not selected.kg
 			or not selected.size or not selected.rarity or selected.bracket == nil then
 			return "Need exactly one animal with complete carry attributes."
@@ -803,10 +788,10 @@ function afk.start()
 		if picked ~= true then return picked end
 		-- No yield between confirmation and return.
 		local returnPosition = AFK_RETURN_POSITION + Vector3.new(0, AFK_RETURN_HEIGHT_OFFSET, 0)
-		setNoclip(true, returnPosition.Y)
+		setNoclip(true)
 		paintToggle(noclipButton, "Noclip", true)
 		moveRoot(character, root, returnPosition)
-		-- Leave noclip and vertical support enabled at the return point.
+		-- Leave ground-following noclip enabled at the return point.
 		if savedMovement then savedMovement.noclip = true end
 		return "AFK finished: picked up and returned to original point."
 	end
