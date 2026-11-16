@@ -1,43 +1,37 @@
---// Orb Auto Collect (SandOrbs / VoidOrbs) - Nearest First
+--// Orb Auto Collect (Orbs / SandOrbs / VoidOrbs) - Nearest First + Floating UI
 local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
 local player = Players.LocalPlayer
 
-local Settings = {
-	SandOrb = false,
-	VoidOrb = false,
-}
-
-local FOLDERS = {
-	SandOrb = "SandOrbs",
-	VoidOrb = "VoidOrbs",
-}
+local Settings = { Orb = false, SandOrb = false, VoidOrb = false }
+local FOLDERS  = { Orb = "Orbs", SandOrb = "SandOrbs", VoidOrb = "VoidOrbs" }
 
 local COLLECT_TIMEOUT = 1.5   -- รอให้ orb หายไปสูงสุดกี่วินาที
 local DELAY_BETWEEN   = 0.15  -- หน่วงระหว่างวาร์ปแต่ละครั้ง
-local SKIP_COOLDOWN   = 5     -- ถ้าเก็บแล้ว orb ไม่หาย จะข้ามอันนั้นกี่วินาที
+local SKIP_COOLDOWN   = 5     -- ถ้าเก็บแล้วไม่หาย ข้ามกี่วินาที
 
 local recentlyVisited = setmetatable({}, { __mode = "k" })
 local running = false
 
--- หา HumanoidRootPart
+local function anyEnabled()
+	for _, v in pairs(Settings) do if v then return true end end
+	return false
+end
+
 local function getRoot()
 	local char = player.Character
 	return char and char:FindFirstChild("HumanoidRootPart")
 end
 
--- หา Part หลักของ orb (รองรับทั้ง Model และ Part)
 local function getOrbPart(orb)
-	if orb:IsA("BasePart") then
-		return orb
-	elseif orb:IsA("Model") then
+	if orb:IsA("BasePart") then return orb end
+	if orb:IsA("Model") then
 		return orb.PrimaryPart or orb:FindFirstChildWhichIsA("BasePart", true)
 	end
 end
 
--- รวบรวม orb จากโฟลเดอร์ที่เปิดอยู่
 local function getOrbs()
-	local list = {}
-	local now = tick()
+	local list, now = {}, tick()
 	for key, enabled in pairs(Settings) do
 		if enabled then
 			local folder = workspace:FindFirstChild(FOLDERS[key])
@@ -55,26 +49,22 @@ local function getOrbs()
 	return list
 end
 
--- เลือก orb ที่ใกล้ที่สุด
 local function getNearest(root, list)
 	local best, bestDist = nil, math.huge
-	for _, data in ipairs(list) do
-		local dist = (data.part.Position - root.Position).Magnitude
-		if dist < bestDist then
-			best, bestDist = data, dist
-		end
+	for _, d in ipairs(list) do
+		local dist = (d.part.Position - root.Position).Magnitude
+		if dist < bestDist then best, bestDist = d, dist end
 	end
 	return best
 end
 
--- วาร์ปไปเก็บ
 local function collect(root, data)
 	local orb, part = data.orb, data.part
 	root.CFrame = CFrame.new(part.Position)
 
-	-- กรณีเก็บด้วยการแตะ
 	if firetouchinterest then
-		for _, p in ipairs(orb:IsA("BasePart") and { orb } or orb:GetDescendants()) do
+		local parts = orb:IsA("BasePart") and { orb } or orb:GetDescendants()
+		for _, p in ipairs(parts) do
 			if p:IsA("BasePart") then
 				firetouchinterest(root, p, 0)
 				firetouchinterest(root, p, 1)
@@ -82,28 +72,19 @@ local function collect(root, data)
 		end
 	end
 
-	-- กรณีเก็บด้วย ProximityPrompt
 	local prompt = orb:FindFirstChildWhichIsA("ProximityPrompt", true)
-	if prompt and fireproximityprompt then
-		fireproximityprompt(prompt)
-	end
+	if prompt and fireproximityprompt then fireproximityprompt(prompt) end
 
-	-- รอจน orb หายไป หรือหมดเวลา
 	local t = tick()
-	while orb.Parent and tick() - t < COLLECT_TIMEOUT do
-		task.wait()
-	end
-	if orb.Parent then
-		recentlyVisited[orb] = tick() -- ยังไม่หาย ข้ามไปก่อน
-	end
+	while orb.Parent and tick() - t < COLLECT_TIMEOUT do task.wait() end
+	if orb.Parent then recentlyVisited[orb] = tick() end
 end
 
--- ลูปหลัก (ใช้ร่วมกันทั้ง 2 ตัวเลือก)
 local function startLoop()
 	if running then return end
 	running = true
 	task.spawn(function()
-		while Settings.SandOrb or Settings.VoidOrb do
+		while anyEnabled() do
 			local root = getRoot()
 			if root then
 				local target = getNearest(root, getOrbs())
@@ -111,10 +92,10 @@ local function startLoop()
 					collect(root, target)
 					task.wait(DELAY_BETWEEN)
 				else
-					task.wait(0.5) -- ไม่มี orb รอ spawn
+					task.wait(0.5)
 				end
 			else
-				task.wait(1) -- ตัวละครยังไม่เกิด
+				task.wait(1)
 			end
 		end
 		running = false
@@ -122,48 +103,133 @@ local function startLoop()
 end
 
 --================ ฟังก์ชันเปิด/ปิด ================--
-
-function ToggleSandOrb(state)
-	if state == nil then state = not Settings.SandOrb end
-	Settings.SandOrb = state
-	print("[SandOrb]", state and "ON" or "OFF")
-	if state then startLoop() end
-	return state
+local function makeToggle(key)
+	return function(state)
+		if state == nil then state = not Settings[key] end
+		Settings[key] = state
+		if state then startLoop() end
+		return state
+	end
 end
 
-function ToggleVoidOrb(state)
-	if state == nil then state = not Settings.VoidOrb end
-	Settings.VoidOrb = state
-	print("[VoidOrb]", state and "ON" or "OFF")
-	if state then startLoop() end
-	return state
-end
+ToggleOrb     = makeToggle("Orb")
+ToggleSandOrb = makeToggle("SandOrb")
+ToggleVoidOrb = makeToggle("VoidOrb")
 
---================ ปุ่ม GUI ง่าย ๆ ================--
+--================ Floating UI ================--
+local parentGui = (gethui and gethui()) or game:GetService("CoreGui")
+local old = parentGui:FindFirstChild("OrbCollector")
+if old then old:Destroy() end
 
 local gui = Instance.new("ScreenGui")
 gui.Name = "OrbCollector"
 gui.ResetOnSpawn = false
-gui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = parentGui
 
-local function makeButton(text, y, callback)
+local main = Instance.new("Frame")
+main.Size = UDim2.new(0, 200, 0, 190)
+main.Position = UDim2.new(0, 20, 0, 150)
+main.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+main.BorderSizePixel = 0
+main.ClipsDescendants = true
+main.Parent = gui
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
+local stroke = Instance.new("UIStroke", main)
+stroke.Color = Color3.fromRGB(80, 80, 95)
+stroke.Thickness = 1.5
+
+-- แถบหัว (ใช้ลาก)
+local title = Instance.new("Frame")
+title.Size = UDim2.new(1, 0, 0, 32)
+title.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+title.BorderSizePixel = 0
+title.Parent = main
+Instance.new("UICorner", title).CornerRadius = UDim.new(0, 10)
+
+local titleText = Instance.new("TextLabel")
+titleText.Size = UDim2.new(1, -40, 1, 0)
+titleText.Position = UDim2.new(0, 10, 0, 0)
+titleText.BackgroundTransparency = 1
+titleText.Text = "Orb Collector"
+titleText.TextColor3 = Color3.new(1, 1, 1)
+titleText.Font = Enum.Font.GothamBold
+titleText.TextSize = 14
+titleText.TextXAlignment = Enum.TextXAlignment.Left
+titleText.Parent = title
+
+local minBtn = Instance.new("TextButton")
+minBtn.Size = UDim2.new(0, 26, 0, 22)
+minBtn.Position = UDim2.new(1, -31, 0, 5)
+minBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75)
+minBtn.Text = "–"
+minBtn.TextColor3 = Color3.new(1, 1, 1)
+minBtn.Font = Enum.Font.GothamBold
+minBtn.TextSize = 16
+minBtn.Parent = title
+Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
+
+-- เนื้อหา
+local body = Instance.new("Frame")
+body.Size = UDim2.new(1, -20, 1, -42)
+body.Position = UDim2.new(0, 10, 0, 38)
+body.BackgroundTransparency = 1
+body.Parent = main
+local layout = Instance.new("UIListLayout", body)
+layout.Padding = UDim.new(0, 8)
+
+local ON_COLOR  = Color3.fromRGB(50, 170, 80)
+local OFF_COLOR = Color3.fromRGB(170, 50, 50)
+
+local function makeButton(label, toggleFn)
 	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.new(0, 160, 0, 36)
-	btn.Position = UDim2.new(0, 20, 0, y)
-	btn.BackgroundColor3 = Color3.fromRGB(170, 50, 50)
+	btn.Size = UDim2.new(1, 0, 0, 40)
+	btn.BackgroundColor3 = OFF_COLOR
 	btn.TextColor3 = Color3.new(1, 1, 1)
 	btn.Font = Enum.Font.GothamBold
 	btn.TextSize = 14
-	btn.Text = text .. ": OFF"
-	btn.Parent = gui
+	btn.Text = label .. ": OFF"
+	btn.Parent = body
 	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
-
 	btn.MouseButton1Click:Connect(function()
-		local on = callback()
-		btn.Text = text .. (on and ": ON" or ": OFF")
-		btn.BackgroundColor3 = on and Color3.fromRGB(50, 170, 80) or Color3.fromRGB(170, 50, 50)
+		local on = toggleFn()
+		btn.Text = label .. (on and ": ON" or ": OFF")
+		btn.BackgroundColor3 = on and ON_COLOR or OFF_COLOR
 	end)
 end
 
-makeButton("SandOrb", 200, function() return ToggleSandOrb() end)
-makeButton("VoidOrb", 245, function() return ToggleVoidOrb() end)
+makeButton("Orb",     ToggleOrb)
+makeButton("SandOrb", ToggleSandOrb)
+makeButton("VoidOrb", ToggleVoidOrb)
+
+-- ย่อ / ขยาย
+local minimized = false
+minBtn.MouseButton1Click:Connect(function()
+	minimized = not minimized
+	body.Visible = not minimized
+	main.Size = minimized and UDim2.new(0, 200, 0, 32) or UDim2.new(0, 200, 0, 190)
+	minBtn.Text = minimized and "+" or "–"
+end)
+
+-- ลากย้าย (เมาส์ + ทัช)
+local dragging, dragStart, startPos
+title.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = true
+		dragStart = input.Position
+		startPos = main.Position
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then dragging = false end
+		end)
+	end
+end)
+
+UIS.InputChanged:Connect(function(input)
+	if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+		or input.UserInputType == Enum.UserInputType.Touch) then
+		local delta = input.Position - dragStart
+		main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
+			startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+	end
+end)
