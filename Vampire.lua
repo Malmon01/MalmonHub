@@ -1,174 +1,169 @@
+--// Orb Auto Collect (SandOrbs / VoidOrbs) - Nearest First
 local Players = game:GetService("Players")
-local W = game:GetService("Workspace")
 local player = Players.LocalPlayer
-local pg = player:WaitForChild("PlayerGui")
 
-local old = pg:FindFirstChild("_MazeTileMenu")
-if old then old:Destroy() end
+local Settings = {
+	SandOrb = false,
+	VoidOrb = false,
+}
+
+local FOLDERS = {
+	SandOrb = "SandOrbs",
+	VoidOrb = "VoidOrbs",
+}
+
+local COLLECT_TIMEOUT = 1.5   -- รอให้ orb หายไปสูงสุดกี่วินาที
+local DELAY_BETWEEN   = 0.15  -- หน่วงระหว่างวาร์ปแต่ละครั้ง
+local SKIP_COOLDOWN   = 5     -- ถ้าเก็บแล้ว orb ไม่หาย จะข้ามอันนั้นกี่วินาที
+
+local recentlyVisited = setmetatable({}, { __mode = "k" })
+local running = false
+
+-- หา HumanoidRootPart
+local function getRoot()
+	local char = player.Character
+	return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+-- หา Part หลักของ orb (รองรับทั้ง Model และ Part)
+local function getOrbPart(orb)
+	if orb:IsA("BasePart") then
+		return orb
+	elseif orb:IsA("Model") then
+		return orb.PrimaryPart or orb:FindFirstChildWhichIsA("BasePart", true)
+	end
+end
+
+-- รวบรวม orb จากโฟลเดอร์ที่เปิดอยู่
+local function getOrbs()
+	local list = {}
+	local now = tick()
+	for key, enabled in pairs(Settings) do
+		if enabled then
+			local folder = workspace:FindFirstChild(FOLDERS[key])
+			if folder then
+				for _, orb in ipairs(folder:GetChildren()) do
+					local part = getOrbPart(orb)
+					local last = recentlyVisited[orb]
+					if part and not (last and now - last < SKIP_COOLDOWN) then
+						table.insert(list, { orb = orb, part = part })
+					end
+				end
+			end
+		end
+	end
+	return list
+end
+
+-- เลือก orb ที่ใกล้ที่สุด
+local function getNearest(root, list)
+	local best, bestDist = nil, math.huge
+	for _, data in ipairs(list) do
+		local dist = (data.part.Position - root.Position).Magnitude
+		if dist < bestDist then
+			best, bestDist = data, dist
+		end
+	end
+	return best
+end
+
+-- วาร์ปไปเก็บ
+local function collect(root, data)
+	local orb, part = data.orb, data.part
+	root.CFrame = CFrame.new(part.Position)
+
+	-- กรณีเก็บด้วยการแตะ
+	if firetouchinterest then
+		for _, p in ipairs(orb:IsA("BasePart") and { orb } or orb:GetDescendants()) do
+			if p:IsA("BasePart") then
+				firetouchinterest(root, p, 0)
+				firetouchinterest(root, p, 1)
+			end
+		end
+	end
+
+	-- กรณีเก็บด้วย ProximityPrompt
+	local prompt = orb:FindFirstChildWhichIsA("ProximityPrompt", true)
+	if prompt and fireproximityprompt then
+		fireproximityprompt(prompt)
+	end
+
+	-- รอจน orb หายไป หรือหมดเวลา
+	local t = tick()
+	while orb.Parent and tick() - t < COLLECT_TIMEOUT do
+		task.wait()
+	end
+	if orb.Parent then
+		recentlyVisited[orb] = tick() -- ยังไม่หาย ข้ามไปก่อน
+	end
+end
+
+-- ลูปหลัก (ใช้ร่วมกันทั้ง 2 ตัวเลือก)
+local function startLoop()
+	if running then return end
+	running = true
+	task.spawn(function()
+		while Settings.SandOrb or Settings.VoidOrb do
+			local root = getRoot()
+			if root then
+				local target = getNearest(root, getOrbs())
+				if target then
+					collect(root, target)
+					task.wait(DELAY_BETWEEN)
+				else
+					task.wait(0.5) -- ไม่มี orb รอ spawn
+				end
+			else
+				task.wait(1) -- ตัวละครยังไม่เกิด
+			end
+		end
+		running = false
+	end)
+end
+
+--================ ฟังก์ชันเปิด/ปิด ================--
+
+function ToggleSandOrb(state)
+	if state == nil then state = not Settings.SandOrb end
+	Settings.SandOrb = state
+	print("[SandOrb]", state and "ON" or "OFF")
+	if state then startLoop() end
+	return state
+end
+
+function ToggleVoidOrb(state)
+	if state == nil then state = not Settings.VoidOrb end
+	Settings.VoidOrb = state
+	print("[VoidOrb]", state and "ON" or "OFF")
+	if state then startLoop() end
+	return state
+end
+
+--================ ปุ่ม GUI ง่าย ๆ ================--
 
 local gui = Instance.new("ScreenGui")
-gui.Name = "_MazeTileMenu"
+gui.Name = "OrbCollector"
 gui.ResetOnSpawn = false
-gui.Parent = pg
+gui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
 
-local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(310, 370)
-frame.Position = UDim2.new(1, -325, 0.5, -185)
-frame.BackgroundColor3 = Color3.fromRGB(25, 28, 35)
-frame.Parent = gui
+local function makeButton(text, y, callback)
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(0, 160, 0, 36)
+	btn.Position = UDim2.new(0, 20, 0, y)
+	btn.BackgroundColor3 = Color3.fromRGB(170, 50, 50)
+	btn.TextColor3 = Color3.new(1, 1, 1)
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 14
+	btn.Text = text .. ": OFF"
+	btn.Parent = gui
+	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
 
-local title = Instance.new("TextButton")
-title.Size = UDim2.new(1, 0, 0, 36)
-title.BackgroundColor3 = Color3.fromRGB(40, 45, 55)
-title.TextColor3 = Color3.new(1, 1, 1)
-title.Font = Enum.Font.GothamBold
-title.TextSize = 14
-title.Text = "MazeTile — Hide"
-title.Parent = frame
-
-local refresh = Instance.new("TextButton")
-refresh.Position = UDim2.fromOffset(8, 42)
-refresh.Size = UDim2.new(1, -16, 0, 32)
-refresh.BackgroundColor3 = Color3.fromRGB(45, 90, 130)
-refresh.TextColor3 = Color3.new(1, 1, 1)
-refresh.Text = "Refresh"
-refresh.TextSize = 14
-refresh.Parent = frame
-
-local status = Instance.new("TextLabel")
-status.Position = UDim2.fromOffset(8, 78)
-status.Size = UDim2.new(1, -16, 0, 30)
-status.BackgroundTransparency = 1
-status.TextColor3 = Color3.new(1, 1, 1)
-status.TextSize = 12
-status.TextWrapped = true
-status.Parent = frame
-
-local list = Instance.new("ScrollingFrame")
-list.Position = UDim2.fromOffset(8, 112)
-list.Size = UDim2.new(1, -16, 1, -120)
-list.BackgroundTransparency = 1
-list.BorderSizePixel = 0
-list.ScrollBarThickness = 5
-list.AutomaticCanvasSize = Enum.AutomaticSize.Y
-list.CanvasSize = UDim2.fromOffset(0, 0)
-list.Parent = frame
-
-local layout = Instance.new("UIListLayout")
-layout.Padding = UDim.new(0, 5)
-layout.SortOrder = Enum.SortOrder.LayoutOrder
-layout.Parent = list
-
-local expanded = true
-
-title.Activated:Connect(function()
-	expanded = not expanded
-	refresh.Visible = expanded
-	status.Visible = expanded
-	list.Visible = expanded
-	frame.Size = UDim2.fromOffset(310, expanded and 370 or 36)
-	title.Text = expanded and "MazeTile — Hide" or "MazeTile — Show"
-end)
-
-local function teleport(tile)
-	if not tile:IsDescendantOf(W) then
-		status.Text = "Tile removed — press Refresh"
-		return
-	end
-
-	local character = player.Character
-	local root = character and character:FindFirstChild("HumanoidRootPart")
-	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-
-	if not root or not humanoid or humanoid.Health <= 0 then
-		status.Text = "Character not ready"
-		return
-	end
-
-	local cf, size = tile.CFrame, tile.Size
-	local halfHeight =
-		math.abs(cf.RightVector.Y) * size.X / 2
-		+ math.abs(cf.UpVector.Y) * size.Y / 2
-		+ math.abs(cf.LookVector.Y) * size.Z / 2
-
-	local position = tile.Position + Vector3.new(
-		0,
-		halfHeight + humanoid.HipHeight + root.Size.Y / 2 + 1,
-		0
-	)
-
-	local destination = CFrame.new(position) * root.CFrame.Rotation
-	local offset = root.CFrame:ToObjectSpace(character:GetPivot())
-
-	character:PivotTo(destination * offset)
-	root.AssemblyLinearVelocity = Vector3.zero
-	root.AssemblyAngularVelocity = Vector3.zero
-
-	status.Text = "Moved to selected MazeTile"
-	print("MazeTile destination:", tile:GetFullName())
-end
-
-local function roomName(tile)
-	local ancestor = tile.Parent
-	while ancestor and ancestor ~= W do
-		if ancestor:IsA("Model") then
-			return ancestor.Name
-		end
-		ancestor = ancestor.Parent
-	end
-	return tile.Parent and tile.Parent.Name or "MazeTile"
-end
-
-local function rebuild()
-	for _, child in ipairs(list:GetChildren()) do
-		if child:IsA("TextButton") then child:Destroy() end
-	end
-
-	local character = player.Character
-	local root = character and character:FindFirstChild("HumanoidRootPart")
-	local tiles = {}
-
-	for _, object in ipairs(W:GetDescendants()) do
-		if object:IsA("BasePart")
-			and object.Name:lower() == "mazetile" then
-			table.insert(tiles, {
-				tile = object,
-				room = roomName(object),
-				distance = root
-					and (object.Position - root.Position).Magnitude
-					or 0,
-			})
-		end
-	end
-
-	table.sort(tiles, function(a, b)
-		return a.distance < b.distance
+	btn.MouseButton1Click:Connect(function()
+		local on = callback()
+		btn.Text = text .. (on and ": ON" or ": OFF")
+		btn.BackgroundColor3 = on and Color3.fromRGB(50, 170, 80) or Color3.fromRGB(170, 50, 50)
 	end)
-
-	for index, entry in ipairs(tiles) do
-		local tile = entry.tile
-		local button = Instance.new("TextButton")
-		button.Size = UDim2.new(1, -8, 0, 52)
-		button.LayoutOrder = index
-		button.BackgroundColor3 = Color3.fromRGB(45, 50, 65)
-		button.TextColor3 = Color3.fromRGB(255, 225, 90)
-		button.Font = Enum.Font.Gotham
-		button.TextSize = 12
-		button.TextWrapped = true
-		button.Text = string.format(
-			"%d. %s\nDistance: %.0f studs",
-			index, entry.room, entry.distance
-		)
-		button.Parent = list
-
-		button.Activated:Connect(function()
-			teleport(tile)
-		end)
-	end
-
-	list.CanvasPosition = Vector2.zero
-	status.Text = string.format("Found %d MazeTiles", #tiles)
 end
 
-refresh.Activated:Connect(rebuild)
-rebuild()
+makeButton("SandOrb", 200, function() return ToggleSandOrb() end)
+makeButton("VoidOrb", 245, function() return ToggleVoidOrb() end)
