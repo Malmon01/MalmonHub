@@ -1,18 +1,23 @@
---// Orb Auto Collect (Orbs / SandOrbs / VoidOrbs) - Nearest First + Floating UI
+--// Orb Auto Collect (Orbs / SandOrbs / VoidOrbs)
+--// Big First + Nearest + Floating UI (ย่อได้ / ลากได้)
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local player = Players.LocalPlayer
 
+--================ ตั้งค่า ================--
 local Settings = { Orb = false, SandOrb = false, VoidOrb = false }
 local FOLDERS  = { Orb = "Orbs", SandOrb = "SandOrbs", VoidOrb = "VoidOrbs" }
 
 local COLLECT_TIMEOUT = 1.5   -- รอให้ orb หายไปสูงสุดกี่วินาที
 local DELAY_BETWEEN   = 0.15  -- หน่วงระหว่างวาร์ปแต่ละครั้ง
 local SKIP_COOLDOWN   = 5     -- ถ้าเก็บแล้วไม่หาย ข้ามกี่วินาที
+local BIG_FIRST       = true  -- true = ไปลูกใหญ่ก่อน, false = ไปลูกใกล้ก่อน
+local SIZE_TOLERANCE  = 0.3   -- ขนาดต่างกันไม่เกินเท่านี้ ถือว่าเท่ากัน แล้วเลือกลูกที่ใกล้กว่า
 
 local recentlyVisited = setmetatable({}, { __mode = "k" })
 local running = false
 
+--================ ฟังก์ชันช่วย ================--
 local function anyEnabled()
 	for _, v in pairs(Settings) do if v then return true end end
 	return false
@@ -28,6 +33,14 @@ local function getOrbPart(orb)
 	if orb:IsA("Model") then
 		return orb.PrimaryPart or orb:FindFirstChildWhichIsA("BasePart", true)
 	end
+end
+
+local function getOrbSize(orb, part)
+	if orb:IsA("Model") then
+		local ok, size = pcall(function() return orb:GetExtentsSize() end)
+		if ok then return size.Magnitude end
+	end
+	return part.Size.Magnitude
 end
 
 local function getOrbs()
@@ -49,11 +62,23 @@ local function getOrbs()
 	return list
 end
 
-local function getNearest(root, list)
-	local best, bestDist = nil, math.huge
+-- เลือกเป้าหมาย: ใหญ่ก่อน ถ้าขนาดพอ ๆ กันเลือกใกล้กว่า
+local function getTarget(root, list)
+	local best, bestSize, bestDist = nil, -math.huge, math.huge
 	for _, d in ipairs(list) do
 		local dist = (d.part.Position - root.Position).Magnitude
-		if dist < bestDist then best, bestDist = d, dist end
+		local size = BIG_FIRST and getOrbSize(d.orb, d.part) or 0
+
+		local better
+		if size > bestSize + SIZE_TOLERANCE then
+			better = true
+		elseif math.abs(size - bestSize) <= SIZE_TOLERANCE then
+			better = dist < bestDist
+		end
+
+		if better then
+			best, bestSize, bestDist = d, size, dist
+		end
 	end
 	return best
 end
@@ -62,6 +87,7 @@ local function collect(root, data)
 	local orb, part = data.orb, data.part
 	root.CFrame = CFrame.new(part.Position)
 
+	-- เก็บแบบแตะ
 	if firetouchinterest then
 		local parts = orb:IsA("BasePart") and { orb } or orb:GetDescendants()
 		for _, p in ipairs(parts) do
@@ -72,14 +98,17 @@ local function collect(root, data)
 		end
 	end
 
+	-- เก็บแบบ ProximityPrompt
 	local prompt = orb:FindFirstChildWhichIsA("ProximityPrompt", true)
 	if prompt and fireproximityprompt then fireproximityprompt(prompt) end
 
+	-- รอจน orb หาย หรือหมดเวลา
 	local t = tick()
 	while orb.Parent and tick() - t < COLLECT_TIMEOUT do task.wait() end
 	if orb.Parent then recentlyVisited[orb] = tick() end
 end
 
+--================ ลูปหลัก ================--
 local function startLoop()
 	if running then return end
 	running = true
@@ -87,7 +116,7 @@ local function startLoop()
 		while anyEnabled() do
 			local root = getRoot()
 			if root then
-				local target = getNearest(root, getOrbs())
+				local target = getTarget(root, getOrbs())
 				if target then
 					collect(root, target)
 					task.wait(DELAY_BETWEEN)
@@ -116,10 +145,19 @@ ToggleOrb     = makeToggle("Orb")
 ToggleSandOrb = makeToggle("SandOrb")
 ToggleVoidOrb = makeToggle("VoidOrb")
 
+function ToggleBigFirst(state)
+	if state == nil then state = not BIG_FIRST end
+	BIG_FIRST = state
+	return state
+end
+
 --================ Floating UI ================--
 local parentGui = (gethui and gethui()) or game:GetService("CoreGui")
 local old = parentGui:FindFirstChild("OrbCollector")
 if old then old:Destroy() end
+
+local FULL_HEIGHT = 238
+local WIDTH = 200
 
 local gui = Instance.new("ScreenGui")
 gui.Name = "OrbCollector"
@@ -128,7 +166,7 @@ gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.Parent = parentGui
 
 local main = Instance.new("Frame")
-main.Size = UDim2.new(0, 200, 0, 190)
+main.Size = UDim2.new(0, WIDTH, 0, FULL_HEIGHT)
 main.Position = UDim2.new(0, 20, 0, 150)
 main.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
 main.BorderSizePixel = 0
@@ -139,7 +177,7 @@ local stroke = Instance.new("UIStroke", main)
 stroke.Color = Color3.fromRGB(80, 80, 95)
 stroke.Thickness = 1.5
 
--- แถบหัว (ใช้ลาก)
+-- แถบหัว (ลากตรงนี้)
 local title = Instance.new("Frame")
 title.Size = UDim2.new(1, 0, 0, 32)
 title.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
@@ -181,33 +219,37 @@ layout.Padding = UDim.new(0, 8)
 local ON_COLOR  = Color3.fromRGB(50, 170, 80)
 local OFF_COLOR = Color3.fromRGB(170, 50, 50)
 
-local function makeButton(label, toggleFn)
+local function makeButton(label, toggleFn, initial)
 	local btn = Instance.new("TextButton")
 	btn.Size = UDim2.new(1, 0, 0, 40)
-	btn.BackgroundColor3 = OFF_COLOR
 	btn.TextColor3 = Color3.new(1, 1, 1)
 	btn.Font = Enum.Font.GothamBold
 	btn.TextSize = 14
-	btn.Text = label .. ": OFF"
 	btn.Parent = body
 	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
-	btn.MouseButton1Click:Connect(function()
-		local on = toggleFn()
+
+	local function render(on)
 		btn.Text = label .. (on and ": ON" or ": OFF")
 		btn.BackgroundColor3 = on and ON_COLOR or OFF_COLOR
+	end
+	render(initial or false)
+
+	btn.MouseButton1Click:Connect(function()
+		render(toggleFn())
 	end)
 end
 
-makeButton("Orb",     ToggleOrb)
-makeButton("SandOrb", ToggleSandOrb)
-makeButton("VoidOrb", ToggleVoidOrb)
+makeButton("Orb",       ToggleOrb,      Settings.Orb)
+makeButton("SandOrb",   ToggleSandOrb,  Settings.SandOrb)
+makeButton("VoidOrb",   ToggleVoidOrb,  Settings.VoidOrb)
+makeButton("Big First", ToggleBigFirst, BIG_FIRST)
 
 -- ย่อ / ขยาย
 local minimized = false
 minBtn.MouseButton1Click:Connect(function()
 	minimized = not minimized
 	body.Visible = not minimized
-	main.Size = minimized and UDim2.new(0, 200, 0, 32) or UDim2.new(0, 200, 0, 190)
+	main.Size = UDim2.new(0, WIDTH, 0, minimized and 32 or FULL_HEIGHT)
 	minBtn.Text = minimized and "+" or "–"
 end)
 
@@ -229,7 +271,9 @@ UIS.InputChanged:Connect(function(input)
 	if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
 		or input.UserInputType == Enum.UserInputType.Touch) then
 		local delta = input.Position - dragStart
-		main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
-			startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		main.Position = UDim2.new(
+			startPos.X.Scale, startPos.X.Offset + delta.X,
+			startPos.Y.Scale, startPos.Y.Offset + delta.Y
+		)
 	end
 end)
