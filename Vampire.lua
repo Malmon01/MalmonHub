@@ -1,7 +1,8 @@
 --// Auto Farm: Orbs / SandOrbs / VoidOrbs + Mob Farm + Eat Corpse + Eat Egg
---// Big First + Nearest + Floating UI (ย่อได้ / ลากได้)
+--// Big First + Nearest + Smooth Follow + Floating UI (ย่อได้ / ลากได้)
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
 
 --================ ตั้งค่า ================--
@@ -32,7 +33,7 @@ local CORPSE_SKIP    = 20
 local EGG_FOLDER    = "Breakables"
 local EGG_NAMES     = {
 	["Egg Cluster"]   = true,
-	-- ["Golden Cocoon"] = true,   -- เอาเครื่องหมาย -- ออกถ้าอยากตีด้วย
+	-- ["Golden Cocoon"] = true,   -- เอา -- ออกถ้าอยากตีด้วย
 	-- ["Acorn"]         = true,
 }
 local EGG_ZONE_ONLY = false   -- true = เฉพาะในโซน, false = ทั้งแมพ
@@ -103,10 +104,29 @@ local function fireInteract(root, obj)
 	if prompt and fireproximityprompt then fireproximityprompt(prompt) end
 end
 
-local function stickTo(root, part, offset)
-	local pos = (part.CFrame * CFrame.new(0, 0, offset)).Position
-	root.CFrame = CFrame.lookAt(pos, part.Position)
+--================ เกาะติดเป้าหมายแบบนิ่ง (ทุกเฟรม) ================--
+local followPart, followOffset = nil, 0
+
+RunService.Heartbeat:Connect(function()
+	if not followPart or not followPart.Parent then return end
+	local root = getRoot()
+	if not root then return end
+
+	local target = followPart.Position
+	local pos = target + Vector3.new(0, 0, followOffset)   -- ทิศคงที่ ไม่หมุนตามมอน
+	local look = Vector3.new(target.X, pos.Y, target.Z)     -- หันแค่แนวนอน
+
+	root.CFrame = CFrame.lookAt(pos, look)
 	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+end)
+
+local function stickTo(part, offset)
+	followPart, followOffset = part, offset
+end
+
+local function stopFollow()
+	followPart = nil
 end
 
 --================ Orb ================--
@@ -156,6 +176,7 @@ end
 local function collectOrb(root, data)
 	local orb, part = data.orb, data.part
 	root.CFrame = CFrame.new(part.Position)
+	root.AssemblyLinearVelocity = Vector3.zero
 	fireInteract(root, orb)
 	local t = tick()
 	while orb.Parent and tick() - t < COLLECT_TIMEOUT do task.wait() end
@@ -172,7 +193,6 @@ local function getScore(obj)
 		or 0
 end
 
--- ตาย / แตก แล้วหรือยัง
 local function isDead(obj)
 	if obj:GetAttribute("Dead") or obj:GetAttribute("IsDead")
 		or obj:GetAttribute("IsCorpse") or obj:GetAttribute("Corpse")
@@ -267,31 +287,35 @@ end
 
 local function attackMob(mob)
 	local part = getMainPart(mob)
+	if not part then return end
+	stickTo(part, MOB_OFFSET)
 	local t = tick()
-	while MobFarm and isMobAlive(mob) and tick() - t < MOB_TIMEOUT do
-		local root = getRoot()
-		if not root or not part or not part.Parent then break end
-		stickTo(root, part, MOB_OFFSET)
+	while MobFarm and isMobAlive(mob) and part.Parent and tick() - t < MOB_TIMEOUT do
 		task.wait(0.1)
 	end
+	stopFollow()
 	if isMobAlive(mob) then mobSkipped[mob] = tick() end
 end
 
 -- กินซาก / ตีไข่ (เกาะติดจนหายหรือแตก)
 local function eatTarget(obj, isOn, timeout, offset, skipTable, stopWhenDead)
 	local part = getMainPart(obj)
+	if not part then return end
+	stickTo(part, offset)
 	local t, lastFire = tick(), 0
-	while isOn() and obj.Parent and tick() - t < timeout do
-		if stopWhenDead and isDead(obj) then return end
+	while isOn() and obj.Parent and part.Parent and tick() - t < timeout do
+		if stopWhenDead and isDead(obj) then
+			stopFollow()
+			return
+		end
 		local root = getRoot()
-		if not root or not part or not part.Parent then break end
-		stickTo(root, part, offset)
-		if tick() - lastFire > 0.5 then
+		if root and tick() - lastFire > 0.5 then
 			fireInteract(root, obj)
 			lastFire = tick()
 		end
 		task.wait(0.1)
 	end
+	stopFollow()
 	if obj.Parent then skipTable[obj] = tick() end
 end
 
@@ -349,6 +373,7 @@ local function startLoop()
 				if not did then task.wait(0.3) end
 			end
 		end
+		stopFollow()
 		running = false
 	end)
 end
