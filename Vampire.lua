@@ -1,5 +1,5 @@
---// Auto Farm: Orbs / SandOrbs / VoidOrbs + Mob Farm + Eat Corpse + Eat Egg
---// Big First + Nearest + Smooth Follow + Floating UI (ย่อได้ / ลากได้)
+--// Auto Farm: Orbs / Mob / Corpse / Egg + Cave Farm
+--// Smooth Follow + Floating UI (ย่อได้ / ลากได้)
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
@@ -16,41 +16,60 @@ local SKIP_COOLDOWN   = 5
 local BIG_FIRST       = true
 local SIZE_TOLERANCE  = 0.3
 
--- Mob
+-- Mob (ข้างนอก)
 local MOB_FOLDER   = "Bugs"
-local ZONE_RADIUS  = 250      -- รัศมีโซนจากจุดที่กด Set Zone
+local ZONE_RADIUS  = 250
 local MOB_TIMEOUT  = 25
 local MOB_OFFSET   = 4
 local MOB_SKIP     = 10
 
--- Corpse (ซาก)
+-- Corpse
 local CORPSE_FOLDERS = { "Corpses", "Corpse", "Carcasses", "Bodies", "DeadBugs", "Meat" }
 local EAT_TIMEOUT    = 15
 local EAT_OFFSET     = 3
 local CORPSE_SKIP    = 20
 
--- Egg (ไข่ใน Breakables)
+-- Egg
 local EGG_FOLDER    = "Breakables"
 local EGG_NAMES     = {
 	["Egg Cluster"]   = true,
-	-- ["Golden Cocoon"] = true,   -- เอา -- ออกถ้าอยากตีด้วย
+	-- ["Golden Cocoon"] = true,
 	-- ["Acorn"]         = true,
 }
-local EGG_ZONE_ONLY = false   -- true = เฉพาะในโซน, false = ทั้งแมพ
+local EGG_ZONE_ONLY = false
 local EGG_TIMEOUT   = 10
 local EGG_OFFSET    = 2
 local EGG_SKIP      = 20
 
+-- Cave
+local CAVE_OFFSET       = 4      -- ระยะยืนตีมอนในถ้ำ
+local CAVE_MOB_TIMEOUT  = 30     -- ตีตัวเดียวนานสุด
+local DODGE_DIST        = 18     -- ถอยห่างกี่ studs ตอนหลบ
+local DODGE_TIME        = 1.2    -- หลบนานกี่วินาที
+local WEB_OFFSET        = 4      -- ระยะยืนตีใย
+local WEB_TIMEOUT       = 60     -- ตีใยนานสุด
+local RUN_RADIUS        = 1200   -- ห่างจากจุดกำเนิดถ้ำไม่เกินนี้ = อยู่ในถ้ำ
+local PREFER_HIGH_TIER  = true   -- เลือกถ้ำ Tier สูงก่อน
+local DEBUG_ATTR        = false  -- true = พิมพ์ Attribute มอนที่เปลี่ยน (ไว้หาท่าง้าง)
+local WINDUP_ATTRS = {
+	WindUp = true, Winding = true, Attacking = true, Charging = true,
+	Telegraph = true, State = true, AttackTick = true,
+}
+
 local MobFarm     = false
 local EatCorpse   = false
 local EatEgg      = false
+local CaveFarm    = false
 local ZONE_CENTER = nil
 
 local recentlyVisited = setmetatable({}, { __mode = "k" })
 local mobSkipped      = setmetatable({}, { __mode = "k" })
 local corpseSkipped   = setmetatable({}, { __mode = "k" })
 local eggSkipped      = setmetatable({}, { __mode = "k" })
-local running = false
+local caveSkipped     = setmetatable({}, { __mode = "k" })
+local roomCenters     = setmetatable({}, { __mode = "k" })
+local running, caveRunning = false, false
+local dodgeUntil = 0
 
 --================ ฟังก์ชันช่วย ================--
 local function orbEnabled()
@@ -104,18 +123,16 @@ local function fireInteract(root, obj)
 	if prompt and fireproximityprompt then fireproximityprompt(prompt) end
 end
 
---================ เกาะติดเป้าหมายแบบนิ่ง (ทุกเฟรม) ================--
+--================ เกาะติดเป้าหมายแบบนิ่ง ================--
 local followPart, followOffset = nil, 0
 
 RunService.Heartbeat:Connect(function()
 	if not followPart or not followPart.Parent then return end
 	local root = getRoot()
 	if not root then return end
-
 	local target = followPart.Position
-	local pos = target + Vector3.new(0, 0, followOffset)   -- ทิศคงที่ ไม่หมุนตามมอน
-	local look = Vector3.new(target.X, pos.Y, target.Z)     -- หันแค่แนวนอน
-
+	local pos = target + Vector3.new(0, 0, followOffset)
+	local look = Vector3.new(target.X, pos.Y, target.Z)
 	root.CFrame = CFrame.lookAt(pos, look)
 	root.AssemblyLinearVelocity = Vector3.zero
 	root.AssemblyAngularVelocity = Vector3.zero
@@ -128,6 +145,20 @@ end
 local function stopFollow()
 	followPart = nil
 end
+
+-- เลือดลด = หลบ (ใช้ตอน Cave Farm)
+local function hookHealth()
+	local char = player.Character
+	local hum = char and char:WaitForChild("Humanoid", 5)
+	if not hum then return end
+	local last = hum.Health
+	hum.HealthChanged:Connect(function(h)
+		if CaveFarm and h < last then dodgeUntil = tick() + DODGE_TIME end
+		last = h
+	end)
+end
+player.CharacterAdded:Connect(function() task.wait(1) hookHealth() end)
+task.spawn(hookHealth)
 
 --================ Orb ================--
 local function getOrbSize(orb, part)
@@ -251,14 +282,12 @@ local function getCorpseTarget(root)
 		local last = corpseSkipped[obj]
 		if not (last and now - last < CORPSE_SKIP) then table.insert(list, obj) end
 	end
-
 	local mobFolder = workspace:FindFirstChild(MOB_FOLDER)
 	if mobFolder then
 		for _, obj in ipairs(mobFolder:GetChildren()) do
 			if not isPlayerChar(obj) and isDead(obj) then add(obj) end
 		end
 	end
-
 	for _, name in ipairs(CORPSE_FOLDERS) do
 		local f = workspace:FindFirstChild(name)
 		if f then
@@ -267,7 +296,6 @@ local function getCorpseTarget(root)
 			end
 		end
 	end
-
 	return pickBest(root, list, true)
 end
 
@@ -290,20 +318,19 @@ local function attackMob(mob)
 	if not part then return end
 	stickTo(part, MOB_OFFSET)
 	local t = tick()
-	while MobFarm and isMobAlive(mob) and part.Parent and tick() - t < MOB_TIMEOUT do
+	while MobFarm and not CaveFarm and isMobAlive(mob) and part.Parent and tick() - t < MOB_TIMEOUT do
 		task.wait(0.1)
 	end
 	stopFollow()
 	if isMobAlive(mob) then mobSkipped[mob] = tick() end
 end
 
--- กินซาก / ตีไข่ (เกาะติดจนหายหรือแตก)
 local function eatTarget(obj, isOn, timeout, offset, skipTable, stopWhenDead)
 	local part = getMainPart(obj)
 	if not part then return end
 	stickTo(part, offset)
 	local t, lastFire = tick(), 0
-	while isOn() and obj.Parent and part.Parent and tick() - t < timeout do
+	while isOn() and not CaveFarm and obj.Parent and part.Parent and tick() - t < timeout do
 		if stopWhenDead and isDead(obj) then
 			stopFollow()
 			return
@@ -319,62 +346,325 @@ local function eatTarget(obj, isOn, timeout, offset, skipTable, stopWhenDead)
 	if obj.Parent then skipTable[obj] = tick() end
 end
 
---================ ลูปหลัก ================--
+--================ ลูปหลัก (ข้างนอก) ================--
 local function startLoop()
 	if running then return end
 	running = true
 	task.spawn(function()
 		while anyEnabled() do
+			if CaveFarm then task.wait(0.5) continue end -- Cave Farm ทำงานอยู่ พักไว้ก่อน
+
 			local root = getRoot()
 			if not root then
 				task.wait(1)
-			else
-				local did = false
-
-				-- 1) กินซาก
-				if EatCorpse and ZONE_CENTER then
-					local corpse = getCorpseTarget(root)
-					if corpse then
-						eatTarget(corpse, function() return EatCorpse end,
-							EAT_TIMEOUT, EAT_OFFSET, corpseSkipped, false)
-						did = true
-					end
-				end
-
-				-- 2) ตีไข่
-				if not did and EatEgg then
-					local egg = getEggTarget(root)
-					if egg then
-						eatTarget(egg, function() return EatEgg end,
-							EGG_TIMEOUT, EGG_OFFSET, eggSkipped, true)
-						did = true
-					end
-				end
-
-				-- 3) ตีมอน
-				if not did and MobFarm and ZONE_CENTER then
-					local mob = getMobTarget(root)
-					if mob then
-						attackMob(mob)
-						did = true
-					end
-				end
-
-				-- 4) เก็บ orb
-				if not did and orbEnabled() then
-					local target = getOrbTarget(root, getOrbs())
-					if target then
-						collectOrb(root, target)
-						task.wait(DELAY_BETWEEN)
-						did = true
-					end
-				end
-
-				if not did then task.wait(0.3) end
+				continue
 			end
+
+			local did = false
+
+			if EatCorpse and ZONE_CENTER then
+				local corpse = getCorpseTarget(root)
+				if corpse then
+					eatTarget(corpse, function() return EatCorpse end,
+						EAT_TIMEOUT, EAT_OFFSET, corpseSkipped, false)
+					did = true
+				end
+			end
+
+			if not did and EatEgg then
+				local egg = getEggTarget(root)
+				if egg then
+					eatTarget(egg, function() return EatEgg end,
+						EGG_TIMEOUT, EGG_OFFSET, eggSkipped, true)
+					did = true
+				end
+			end
+
+			if not did and MobFarm and ZONE_CENTER then
+				local mob = getMobTarget(root)
+				if mob then
+					attackMob(mob)
+					did = true
+				end
+			end
+
+			if not did and orbEnabled() then
+				local target = getOrbTarget(root, getOrbs())
+				if target then
+					collectOrb(root, target)
+					task.wait(DELAY_BETWEEN)
+					did = true
+				end
+			end
+
+			if not did then task.wait(0.3) end
 		end
 		stopFollow()
 		running = false
+	end)
+end
+
+--================ Cave ================--
+local function pressButton(btn)
+	local fired = false
+	if getconnections then
+		for _, sig in ipairs({ btn.MouseButton1Click, btn.Activated, btn.MouseButton1Down }) do
+			for _, c in ipairs(getconnections(sig)) do
+				pcall(function()
+					if c.Fire then c:Fire() elseif c.Function then c.Function() end
+				end)
+				fired = true
+			end
+		end
+	end
+	if not fired and firesignal then
+		pcall(firesignal, btn.MouseButton1Click)
+		pcall(firesignal, btn.Activated)
+		fired = true
+	end
+	if not fired then
+		local vim = game:GetService("VirtualInputManager")
+		local inset = game:GetService("GuiService"):GetGuiInset()
+		local p = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+		vim:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 0)
+		task.wait(0.05)
+		vim:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
+	end
+end
+
+local function getLobbyStart()
+	local pg = player:FindFirstChild("PlayerGui")
+	local gui = pg and pg:FindFirstChild("Cave")
+	local lobby = gui and gui:FindFirstChild("CaveLobby")
+	local start = lobby and lobby:FindFirstChild("Start")
+	if start and gui.Enabled and lobby.Visible and start.Visible then return start end
+end
+
+local function getMyLevel()
+	local v = player:GetAttribute("Level") or player:GetAttribute("Lv")
+	if typeof(v) == "number" then return v end
+	local ls = player:FindFirstChild("leaderstats")
+	local s = ls and (ls:FindFirstChild("Level") or ls:FindFirstChild("Lv"))
+	if s then return tonumber(s.Value) or math.huge end
+	return math.huge
+end
+
+local function getMyRun(root)
+	local folder = workspace:FindFirstChild("CaveRuns")
+	if not folder then return nil end
+	for _, m in ipairs(folder:GetChildren()) do
+		if m:IsA("Model") then
+			local origin = m:GetAttribute("Origin")
+			if typeof(origin) == "Vector3" and (origin - root.Position).Magnitude < RUN_RADIUS then
+				return m, m.Name:match("^CaveRun_(.+)$")
+			end
+		end
+	end
+end
+
+local function getCaveEnemies(id)
+	local list = {}
+	local folder = workspace.CaveRuns:FindFirstChild("Enemies_" .. tostring(id))
+	if not folder then return list end
+	for _, e in ipairs(folder:GetChildren()) do
+		local hum = e:FindFirstChildOfClass("Humanoid")
+		local hrp = e:FindFirstChild("HumanoidRootPart")
+		if hum and hrp and hum.Health > 0 then table.insert(list, e) end
+	end
+	return list
+end
+
+local function nearestOf(root, list)
+	local best, bestDist = nil, math.huge
+	for _, e in ipairs(list) do
+		local d = (e.HumanoidRootPart.Position - root.Position).Magnitude
+		if d < bestDist then best, bestDist = e, d end
+	end
+	return best
+end
+
+local function attackCaveEnemy(e)
+	local hum = e:FindFirstChildOfClass("Humanoid")
+	local part = e:FindFirstChild("HumanoidRootPart")
+	if not hum or not part then return end
+
+	local conn = e.AttributeChanged:Connect(function(name)
+		if DEBUG_ATTR then print("[Attr]", e.Name, name, e:GetAttribute(name)) end
+		if WINDUP_ATTRS[name] then dodgeUntil = tick() + DODGE_TIME end
+	end)
+
+	local t = tick()
+	while CaveFarm and e.Parent and hum.Health > 0 and part.Parent and tick() - t < CAVE_MOB_TIMEOUT do
+		if tick() < dodgeUntil then
+			stickTo(part, DODGE_DIST)   -- ถอยหลบ
+		else
+			stickTo(part, CAVE_OFFSET)  -- กลับเข้าไปตี
+		end
+		task.wait(0.05)
+	end
+
+	conn:Disconnect()
+	stopFollow()
+end
+
+local function roomCenter(room)
+	if roomCenters[room] then return roomCenters[room] end
+	local sum, n = Vector3.zero, 0
+	for _, p in ipairs(room:GetDescendants()) do
+		if p:IsA("BasePart") then
+			sum += p.Position
+			n += 1
+		end
+	end
+	if n == 0 then return nil end
+	roomCenters[room] = sum / n
+	return roomCenters[room]
+end
+
+-- วาร์ปไปห้องถัดไป (คืน false ถ้าเป็นห้องสุดท้าย)
+local function advanceRoom(run, root)
+	local rooms = {}
+	for i = 1, 10 do
+		local r = run:FindFirstChild("Room" .. i)
+		if r then
+			local c = roomCenter(r)
+			if c then table.insert(rooms, { i = i, c = c }) end
+		end
+	end
+	local cur, best = nil, math.huge
+	for _, r in ipairs(rooms) do
+		local d = (r.c - root.Position).Magnitude
+		if d < best then cur, best = r, d end
+	end
+	if not cur then return false end
+	for _, r in ipairs(rooms) do
+		if r.i == cur.i + 1 then
+			root.CFrame = CFrame.new(r.c + Vector3.new(0, 5, 0))
+			root.AssemblyLinearVelocity = Vector3.zero
+			return true
+		end
+	end
+	return false
+end
+
+local function chooseCave()
+	local caves = workspace:FindFirstChild("Caves")
+	if not caves then return nil, nil end
+	local myLv = getMyLevel()
+	local open, breakable
+	local function better(a, b)
+		if not b then return true end
+		local ta, tb = a:GetAttribute("Tier") or 0, b:GetAttribute("Tier") or 0
+		if PREFER_HIGH_TIER then return ta > tb else return ta < tb end
+	end
+	for _, cave in ipairs(caves:GetChildren()) do
+		local mouth = cave:FindFirstChild("Mouth")
+		local prompt = mouth and mouth:FindFirstChild("CavePrompt")
+		local web = cave:FindFirstChild("Spider Web")
+		local last = caveSkipped[cave]
+		if not (last and tick() - last < 30) then
+			if prompt and prompt.Enabled then
+				if better(cave, open) then open = cave end
+			elseif web and (web:GetAttribute("MinLevel") or 0) <= myLv then
+				if better(cave, breakable) then breakable = cave end
+			end
+		end
+	end
+	return open, breakable
+end
+
+local function breakWeb(cave)
+	local web = cave:FindFirstChild("Spider Web")
+	local prompt = cave:FindFirstChild("Mouth") and cave.Mouth:FindFirstChild("CavePrompt")
+	local part = web and getMainPart(web)
+	if not part then return end
+	stickTo(part, WEB_OFFSET)
+	local t = tick()
+	while CaveFarm and web.Parent and tick() - t < WEB_TIMEOUT do
+		local hp = web:GetAttribute("HP")
+		if (hp and hp <= 0) or (prompt and prompt.Enabled) then break end
+		task.wait(0.1)
+	end
+	stopFollow()
+	if web.Parent and not (prompt and prompt.Enabled) then caveSkipped[cave] = tick() end
+end
+
+local function enterCave(cave)
+	local mouth = cave:FindFirstChild("Mouth")
+	local prompt = mouth and mouth:FindFirstChild("CavePrompt")
+	local root = getRoot()
+	if not (prompt and root) then return end
+
+	root.CFrame = mouth.CFrame + Vector3.new(0, 3, 0)
+	root.AssemblyLinearVelocity = Vector3.zero
+	task.wait(0.3)
+
+	if fireproximityprompt then
+		fireproximityprompt(prompt)
+	else
+		prompt:InputHoldBegin()
+		task.wait(prompt.HoldDuration + 0.1)
+		prompt:InputHoldEnd()
+	end
+
+	local t = tick()
+	while tick() - t < 5 and not getLobbyStart() do task.wait(0.2) end
+	if not getLobbyStart() then caveSkipped[cave] = tick() end
+end
+
+local function startCaveLoop()
+	if caveRunning then return end
+	caveRunning = true
+	task.spawn(function()
+		local emptySince
+		while CaveFarm do
+			local root = getRoot()
+			if not root then task.wait(1) continue end
+
+			-- 1) อยู่หน้าจอเริ่ม -> กด START
+			local start = getLobbyStart()
+			if start then
+				pressButton(start)
+				task.wait(2)
+				continue
+			end
+
+			-- 2) อยู่ในถ้ำ -> ตีมอน / ไปห้องถัดไป
+			local run, id = getMyRun(root)
+			if run then
+				local enemies = getCaveEnemies(id)
+				if #enemies > 0 then
+					emptySince = nil
+					attackCaveEnemy(nearestOf(root, enemies))
+				else
+					emptySince = emptySince or tick()
+					if tick() - emptySince > 1.5 then
+						if advanceRoom(run, root) then
+							emptySince = nil
+							task.wait(1.5)
+						else
+							task.wait(1) -- ห้องสุดท้าย รอเกมพาออก
+						end
+					else
+						task.wait(0.3)
+					end
+				end
+				continue
+			end
+
+			-- 3) อยู่ข้างนอก -> เข้าถ้ำ หรือ ตีใย
+			emptySince = nil
+			local open, breakable = chooseCave()
+			if open then
+				enterCave(open)
+			elseif breakable then
+				breakWeb(breakable)
+			else
+				task.wait(2)
+			end
+		end
+		stopFollow()
+		caveRunning = false
 	end)
 end
 
@@ -431,6 +721,16 @@ function ToggleEatEgg(state)
 	return state
 end
 
+function ToggleCaveFarm(state)
+	if state == nil then state = not CaveFarm end
+	CaveFarm = state
+	if state then
+		stopFollow()
+		startCaveLoop()
+	end
+	return state
+end
+
 function SetZone()
 	local root = getRoot()
 	if root then
@@ -446,7 +746,7 @@ local parentGui = (gethui and gethui()) or game:GetService("CoreGui")
 local old = parentGui:FindFirstChild("OrbCollector")
 if old then old:Destroy() end
 
-local BUTTON_COUNT = 8
+local BUTTON_COUNT = 9
 local BTN_H, BTN_GAP = 34, 6
 local WIDTH = 200
 local FULL_HEIGHT = 42 + BUTTON_COUNT * (BTN_H + BTN_GAP)
@@ -459,7 +759,7 @@ gui.Parent = parentGui
 
 local main = Instance.new("Frame")
 main.Size = UDim2.new(0, WIDTH, 0, FULL_HEIGHT)
-main.Position = UDim2.new(0, 20, 0, 80)
+main.Position = UDim2.new(0, 20, 0, 60)
 main.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
 main.BorderSizePixel = 0
 main.ClipsDescendants = true
@@ -550,6 +850,7 @@ end)
 makeToggleButton("Mob Farm",   ToggleMobFarm,   MobFarm)
 makeToggleButton("Eat Corpse", ToggleEatCorpse, EatCorpse)
 makeToggleButton("Eat Egg",    ToggleEatEgg,    EatEgg)
+makeToggleButton("Cave Farm",  ToggleCaveFarm,  CaveFarm)
 
 -- ย่อ / ขยาย
 local minimized = false
