@@ -1,5 +1,5 @@
 --// Auto Farm: Orbs / Mob / Corpse / Egg + Cave Farm
---// Smooth Follow + Floating UI (ย่อได้ / ลากได้)
+--// Smooth Follow + Status + Floating UI (ย่อได้ / ลากได้)
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
@@ -44,13 +44,14 @@ local EGG_SKIP      = 20
 -- Cave
 local CAVE_OFFSET       = 4      -- ระยะยืนตีมอนในถ้ำ
 local CAVE_MOB_TIMEOUT  = 30     -- ตีตัวเดียวนานสุด
-local DODGE_DIST        = 18     -- ถอยห่างกี่ studs ตอนหลบ
+local DODGE_DIST        = 18     -- ถอยห่างตอนหลบ
 local DODGE_TIME        = 1.2    -- หลบนานกี่วินาที
 local WEB_OFFSET        = 4      -- ระยะยืนตีใย
 local WEB_TIMEOUT       = 60     -- ตีใยนานสุด
-local RUN_RADIUS        = 1200   -- ห่างจากจุดกำเนิดถ้ำไม่เกินนี้ = อยู่ในถ้ำ
+local RUN_RADIUS        = 2500   -- ห่างจาก Origin ของถ้ำไม่เกินนี้ = อยู่ในถ้ำ
+local INSIDE_GRACE      = 8      -- เพิ่งอยู่ในถ้ำไม่เกินกี่วิ = ยังถือว่าอยู่ข้างใน
 local PREFER_HIGH_TIER  = true   -- เลือกถ้ำ Tier สูงก่อน
-local DEBUG_ATTR        = false  -- true = พิมพ์ Attribute มอนที่เปลี่ยน (ไว้หาท่าง้าง)
+local DEBUG_ATTR        = false  -- true = พิมพ์ Attribute มอนที่เปลี่ยน
 local WINDUP_ATTRS = {
 	WindUp = true, Winding = true, Attacking = true, Charging = true,
 	Telegraph = true, State = true, AttackTick = true,
@@ -70,6 +71,16 @@ local caveSkipped     = setmetatable({}, { __mode = "k" })
 local roomCenters     = setmetatable({}, { __mode = "k" })
 local running, caveRunning = false, false
 local dodgeUntil = 0
+
+--================ สถานะ (โชว์ที่หัว UI) ================--
+local statusLabel
+local lastStatus = ""
+local function setStatus(s)
+	if s == lastStatus then return end
+	lastStatus = s
+	print("[AutoFarm]", s)
+	if statusLabel then statusLabel.Text = s end
+end
 
 --================ ฟังก์ชันช่วย ================--
 local function orbEnabled()
@@ -352,7 +363,7 @@ local function startLoop()
 	running = true
 	task.spawn(function()
 		while anyEnabled() do
-			if CaveFarm then task.wait(0.5) continue end -- Cave Farm ทำงานอยู่ พักไว้ก่อน
+			if CaveFarm then task.wait(0.5) continue end
 
 			local root = getRoot()
 			if not root then
@@ -405,6 +416,9 @@ local function startLoop()
 end
 
 --================ Cave ================--
+local lastInside = 0
+local currentCave = nil
+
 local function pressButton(btn)
 	local fired = false
 	if getconnections then
@@ -432,12 +446,26 @@ local function pressButton(btn)
 	end
 end
 
-local function getLobbyStart()
+local function getCaveGui()
 	local pg = player:FindFirstChild("PlayerGui")
-	local gui = pg and pg:FindFirstChild("Cave")
+	return pg and pg:FindFirstChild("Cave")
+end
+
+local function getLobbyStart()
+	local gui = getCaveGui()
 	local lobby = gui and gui:FindFirstChild("CaveLobby")
 	local start = lobby and lobby:FindFirstChild("Start")
 	if start and gui.Enabled and lobby.Visible and start.Visible then return start end
+end
+
+-- หน้าจอถ้ำของเกมยังเปิดอยู่ไหม (ล็อบบี้ / HUD ในถ้ำ)
+local function caveGuiActive()
+	local gui = getCaveGui()
+	if not (gui and gui.Enabled) then return false end
+	for _, c in ipairs(gui:GetChildren()) do
+		if c:IsA("GuiObject") and c.Visible then return true end
+	end
+	return false
 end
 
 local function getMyLevel()
@@ -449,22 +477,29 @@ local function getMyLevel()
 	return math.huge
 end
 
+-- หาถ้ำที่เราอยู่ (ใกล้ Origin ที่สุด)
 local function getMyRun(root)
 	local folder = workspace:FindFirstChild("CaveRuns")
 	if not folder then return nil end
+	local best, bestDist, bestId
 	for _, m in ipairs(folder:GetChildren()) do
 		if m:IsA("Model") then
 			local origin = m:GetAttribute("Origin")
-			if typeof(origin) == "Vector3" and (origin - root.Position).Magnitude < RUN_RADIUS then
-				return m, m.Name:match("^CaveRun_(.+)$")
+			if typeof(origin) == "Vector3" then
+				local d = (origin - root.Position).Magnitude
+				if d < RUN_RADIUS and d < (bestDist or math.huge) then
+					best, bestDist, bestId = m, d, m.Name:match("^CaveRun_(.+)$")
+				end
 			end
 		end
 	end
+	return best, bestId
 end
 
 local function getCaveEnemies(id)
 	local list = {}
-	local folder = workspace.CaveRuns:FindFirstChild("Enemies_" .. tostring(id))
+	local runs = workspace:FindFirstChild("CaveRuns")
+	local folder = runs and runs:FindFirstChild("Enemies_" .. tostring(id))
 	if not folder then return list end
 	for _, e in ipairs(folder:GetChildren()) do
 		local hum = e:FindFirstChildOfClass("Humanoid")
@@ -495,10 +530,11 @@ local function attackCaveEnemy(e)
 
 	local t = tick()
 	while CaveFarm and e.Parent and hum.Health > 0 and part.Parent and tick() - t < CAVE_MOB_TIMEOUT do
+		lastInside = tick()
 		if tick() < dodgeUntil then
-			stickTo(part, DODGE_DIST)   -- ถอยหลบ
+			stickTo(part, DODGE_DIST)
 		else
-			stickTo(part, CAVE_OFFSET)  -- กลับเข้าไปตี
+			stickTo(part, CAVE_OFFSET)
 		end
 		task.wait(0.05)
 	end
@@ -521,7 +557,6 @@ local function roomCenter(room)
 	return roomCenters[room]
 end
 
--- วาร์ปไปห้องถัดไป (คืน false ถ้าเป็นห้องสุดท้าย)
 local function advanceRoom(run, root)
 	local rooms = {}
 	for i = 1, 10 do
@@ -547,9 +582,18 @@ local function advanceRoom(run, root)
 	return false
 end
 
+local function caveLabel(cave)
+	return tostring(cave:GetAttribute("CaveName") or cave.Name)
+end
+
+local function getPrompt(cave)
+	local mouth = cave:FindFirstChild("Mouth")
+	return mouth and mouth:FindFirstChild("CavePrompt"), mouth
+end
+
 local function chooseCave()
 	local caves = workspace:FindFirstChild("Caves")
-	if not caves then return nil, nil end
+	if not caves then return nil end
 	local myLv = getMyLevel()
 	local open, breakable
 	local function better(a, b)
@@ -558,26 +602,36 @@ local function chooseCave()
 		if PREFER_HIGH_TIER then return ta > tb else return ta < tb end
 	end
 	for _, cave in ipairs(caves:GetChildren()) do
-		local mouth = cave:FindFirstChild("Mouth")
-		local prompt = mouth and mouth:FindFirstChild("CavePrompt")
+		local prompt = getPrompt(cave)
 		local web = cave:FindFirstChild("Spider Web")
 		local last = caveSkipped[cave]
-		if not (last and tick() - last < 30) then
-			if prompt and prompt.Enabled then
+		if prompt and not (last and tick() - last < 30) then
+			if prompt.Enabled then
 				if better(cave, open) then open = cave end
 			elseif web and (web:GetAttribute("MinLevel") or 0) <= myLv then
 				if better(cave, breakable) then breakable = cave end
 			end
 		end
 	end
-	return open, breakable
+	return open or breakable
+end
+
+-- ล็อกถ้ำเดียวจนกว่าจะเสร็จหรือพัง
+local function pickCave()
+	if currentCave and currentCave.Parent then
+		local last = caveSkipped[currentCave]
+		if not (last and tick() - last < 30) then return currentCave end
+	end
+	currentCave = chooseCave()
+	return currentCave
 end
 
 local function breakWeb(cave)
 	local web = cave:FindFirstChild("Spider Web")
-	local prompt = cave:FindFirstChild("Mouth") and cave.Mouth:FindFirstChild("CavePrompt")
+	local prompt = getPrompt(cave)
 	local part = web and getMainPart(web)
 	if not part then return end
+	setStatus("Breaking web: " .. caveLabel(cave))
 	stickTo(part, WEB_OFFSET)
 	local t = tick()
 	while CaveFarm and web.Parent and tick() - t < WEB_TIMEOUT do
@@ -586,30 +640,47 @@ local function breakWeb(cave)
 		task.wait(0.1)
 	end
 	stopFollow()
-	if web.Parent and not (prompt and prompt.Enabled) then caveSkipped[cave] = tick() end
+	if web.Parent and not (prompt and prompt.Enabled) then
+		caveSkipped[cave] = tick() -- ตีไม่แตก ข้ามไปก่อน
+	end
 end
 
 local function enterCave(cave)
-	local mouth = cave:FindFirstChild("Mouth")
-	local prompt = mouth and mouth:FindFirstChild("CavePrompt")
-	local root = getRoot()
-	if not (prompt and root) then return end
+	local prompt, mouth = getPrompt(cave)
+	if not (prompt and mouth) then return false end
+	setStatus("Entering: " .. caveLabel(cave))
+	stopFollow()
 
-	root.CFrame = mouth.CFrame + Vector3.new(0, 3, 0)
-	root.AssemblyLinearVelocity = Vector3.zero
-	task.wait(0.3)
+	for attempt = 1, 3 do
+		local root = getRoot()
+		if not root or not CaveFarm then return false end
+		root.CFrame = CFrame.new(mouth.Position + Vector3.new(0, 3, 0))
+		root.AssemblyLinearVelocity = Vector3.zero
+		task.wait(0.4)
 
-	if fireproximityprompt then
-		fireproximityprompt(prompt)
-	else
-		prompt:InputHoldBegin()
-		task.wait(prompt.HoldDuration + 0.1)
-		prompt:InputHoldEnd()
+		if fireproximityprompt then
+			pcall(fireproximityprompt, prompt)
+		else
+			prompt:InputHoldBegin()
+			task.wait(prompt.HoldDuration + 0.1)
+			prompt:InputHoldEnd()
+		end
+
+		local t = tick()
+		while tick() - t < 4 do
+			local r = getRoot()
+			if getLobbyStart() or (r and getMyRun(r)) then
+				lastInside = tick()
+				return true
+			end
+			task.wait(0.2)
+		end
+		setStatus(("Entering: %s (retry %d)"):format(caveLabel(cave), attempt))
 	end
 
-	local t = tick()
-	while tick() - t < 5 and not getLobbyStart() do task.wait(0.2) end
-	if not getLobbyStart() then caveSkipped[cave] = tick() end
+	caveSkipped[cave] = tick()
+	currentCave = nil
+	return false
 end
 
 local function startCaveLoop()
@@ -619,11 +690,17 @@ local function startCaveLoop()
 		local emptySince
 		while CaveFarm do
 			local root = getRoot()
-			if not root then task.wait(1) continue end
+			if not root then
+				setStatus("Waiting for character")
+				task.wait(1)
+				continue
+			end
 
-			-- 1) อยู่หน้าจอเริ่ม -> กด START
+			-- 1) หน้าจอเริ่ม -> กด START
 			local start = getLobbyStart()
 			if start then
+				lastInside = tick()
+				setStatus("Lobby: pressing START")
 				pressButton(start)
 				task.wait(2)
 				continue
@@ -632,18 +709,22 @@ local function startCaveLoop()
 			-- 2) อยู่ในถ้ำ -> ตีมอน / ไปห้องถัดไป
 			local run, id = getMyRun(root)
 			if run then
+				lastInside = tick()
 				local enemies = getCaveEnemies(id)
 				if #enemies > 0 then
 					emptySince = nil
+					setStatus(("Cave %s: %d enemies"):format(tostring(id), #enemies))
 					attackCaveEnemy(nearestOf(root, enemies))
 				else
 					emptySince = emptySince or tick()
 					if tick() - emptySince > 1.5 then
 						if advanceRoom(run, root) then
+							setStatus("Next room")
 							emptySince = nil
 							task.wait(1.5)
 						else
-							task.wait(1) -- ห้องสุดท้าย รอเกมพาออก
+							setStatus("Last room - waiting")
+							task.wait(1)
 						end
 					else
 						task.wait(0.3)
@@ -652,18 +733,32 @@ local function startCaveLoop()
 				continue
 			end
 
-			-- 3) อยู่ข้างนอก -> เข้าถ้ำ หรือ ตีใย
+			-- 3) เพิ่งออกจากถ้ำ / หน้าจอถ้ำยังเปิด -> รอ ห้ามวาร์ปออก
+			local since = tick() - lastInside
+			if since < INSIDE_GRACE or (since < 120 and caveGuiActive()) then
+				setStatus("Waiting in cave...")
+				task.wait(0.5)
+				continue
+			end
+
+			-- 4) อยู่ข้างนอก -> ถ้ำเดิมที่ล็อกไว้
 			emptySince = nil
-			local open, breakable = chooseCave()
-			if open then
-				enterCave(open)
-			elseif breakable then
-				breakWeb(breakable)
-			else
+			local cave = pickCave()
+			if not cave then
+				setStatus("No cave available")
 				task.wait(2)
+				continue
+			end
+
+			local prompt = getPrompt(cave)
+			if prompt and prompt.Enabled then
+				enterCave(cave)
+			else
+				breakWeb(cave)
 			end
 		end
 		stopFollow()
+		setStatus("Auto Farm")
 		caveRunning = false
 	end)
 end
@@ -726,6 +821,7 @@ function ToggleCaveFarm(state)
 	CaveFarm = state
 	if state then
 		stopFollow()
+		currentCave = nil
 		startCaveLoop()
 	end
 	return state
@@ -748,7 +844,7 @@ if old then old:Destroy() end
 
 local BUTTON_COUNT = 9
 local BTN_H, BTN_GAP = 34, 6
-local WIDTH = 200
+local WIDTH = 220
 local FULL_HEIGHT = 42 + BUTTON_COUNT * (BTN_H + BTN_GAP)
 
 local gui = Instance.new("ScreenGui")
@@ -777,15 +873,17 @@ title.Parent = main
 Instance.new("UICorner", title).CornerRadius = UDim.new(0, 10)
 
 local titleText = Instance.new("TextLabel")
-titleText.Size = UDim2.new(1, -40, 1, 0)
+titleText.Size = UDim2.new(1, -45, 1, 0)
 titleText.Position = UDim2.new(0, 10, 0, 0)
 titleText.BackgroundTransparency = 1
 titleText.Text = "Auto Farm"
 titleText.TextColor3 = Color3.new(1, 1, 1)
 titleText.Font = Enum.Font.GothamBold
-titleText.TextSize = 14
+titleText.TextSize = 12
 titleText.TextXAlignment = Enum.TextXAlignment.Left
+titleText.TextTruncate = Enum.TextTruncate.AtEnd
 titleText.Parent = title
+statusLabel = titleText
 
 local minBtn = Instance.new("TextButton")
 minBtn.Size = UDim2.new(0, 26, 0, 22)
