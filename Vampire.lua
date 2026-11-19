@@ -628,9 +628,12 @@ local function getCaveEnemies(root)
 end
 
 -- ของที่ต้องกัดในถ้ำ: Geode (CaveLoot) ใกล้ ๆ ก่อน -> ประตูใย (CaveDoor) -> ของอื่น
+local getRoomNumber -- ประกาศไว้ก่อน (ตัวจริงอยู่ด้านล่าง)
+
 local function getRunBreakable(run, root)
 	local bestDoor, doorDist, bestLoot, lootDist, bestExtra, extraDist
 	local now = tick()
+	local roomNo = getRoomNumber()
 	local function consider(m)
 		if not (m:IsA("Model") and m:GetAttribute("BreakId")) then return end
 		local hp = m:GetAttribute("HP")
@@ -643,11 +646,17 @@ local function getRunBreakable(run, root)
 		if d > DOOR_RANGE then return end
 		local id = tostring(m:GetAttribute("BreakId"))
 		if id == "CaveLoot" then
-			if CAVE_LOOT and d <= LOOT_RANGE and d < (lootDist or math.huge) then
+			-- Geode เฉพาะห้องที่อยู่ตอนนี้
+			local r = m:GetAttribute("Room")
+			local sameRoom = (roomNo == nil) or (r == nil) or (r == roomNo)
+			if CAVE_LOOT and sameRoom and d <= LOOT_RANGE and d < (lootDist or math.huge) then
 				bestLoot, lootDist = m, d
 			end
 		elseif id == "CaveDoor" then
-			if d < (doorDist or math.huge) then bestDoor, doorDist = m, d end
+			-- ประตูของห้องนี้เท่านั้น (ห้อง N = DoorN) กันวาร์ปข้ามห้อง
+			if (roomNo == nil or m.Name == "Door" .. roomNo) and d < (doorDist or math.huge) then
+				bestDoor, doorDist = m, d
+			end
 		elseif CAVE_BITE_EXTRAS then
 			if d < (extraDist or math.huge) then bestExtra, extraDist = m, d end
 		end
@@ -726,27 +735,43 @@ local function roomCenter(room)
 	return roomCenters[room]
 end
 
+-- เลขห้องปัจจุบันจาก HUD ("ROOM 1/4") ห้องสุดท้ายไม่มีเลข -> nil
+getRoomNumber = function()
+	local lbl = findShownText(function(t)
+		return t:upper():match("ROOM%s*%d+%s*/%s*%d+") ~= nil
+	end)
+	if lbl then return tonumber(lbl.Text:upper():match("ROOM%s*(%d+)%s*/")) end
+end
+
+-- เดินทะลุประตูที่แตกแล้ว (DoorN) เข้าห้อง N+1
 local function advanceRoom(run, root)
-	local rooms = {}
-	for i = 1, 10 do
-		local r = run:FindFirstChild("Room" .. i)
-		if r then
-			local c = roomCenter(r)
-			if c then table.insert(rooms, { i = i, c = c }) end
-		end
+	local n = getRoomNumber()
+	if not n then return false end
+	local nextRoom = run:FindFirstChild("Room" .. (n + 1))
+	local doors = run:FindFirstChild("Doors")
+	local door = doors and doors:FindFirstChild("Door" .. n)
+
+	if door then
+		local hp = door:GetAttribute("HP")
+		if hp and hp > 0 then return false end -- ประตูยังไม่แตก
+		local pv = door:GetPivot()
+		local pos = pv.Position
+		local look = Vector3.new(pv.LookVector.X, 0, pv.LookVector.Z)
+		look = look.Magnitude > 0.1 and look.Unit or Vector3.new(0, 0, 1)
+		-- หันทิศให้ชี้ไปทางห้องถัดไป
+		local c = nextRoom and roomCenter(nextRoom)
+		if c and (c - pos):Dot(look) < 0 then look = -look end
+		root.CFrame = CFrame.new(pos + look * 25 + Vector3.new(0, 3, 0))
+		root.AssemblyLinearVelocity = Vector3.zero
+		return true
 	end
-	local cur, best = nil, math.huge
-	for _, r in ipairs(rooms) do
-		local d = (r.c - root.Position).Magnitude
-		if d < best then cur, best = r, d end
-	end
-	if not cur then return false end
-	for _, r in ipairs(rooms) do
-		if r.i == cur.i + 1 then
-			root.CFrame = CFrame.new(r.c + Vector3.new(0, 5, 0))
-			root.AssemblyLinearVelocity = Vector3.zero
-			return true
-		end
+
+	-- ไม่เจอประตู: วาร์ปไปกลางห้องถัดไปตามเลขห้องจริง
+	local c = nextRoom and roomCenter(nextRoom)
+	if c then
+		root.CFrame = CFrame.new(c + Vector3.new(0, 5, 0))
+		root.AssemblyLinearVelocity = Vector3.zero
+		return true
 	end
 	return false
 end
@@ -942,11 +967,15 @@ local function startCaveLoop()
 				end
 
 				emptySince = emptySince or tick()
-				if run and tick() - emptySince > 6 then
-					setStatus("Cave: next room")
-					advanceRoom(run, root)
-					emptySince = nil
-					task.wait(1.5)
+				if run and tick() - emptySince > 2.5 then
+					if advanceRoom(run, root) then
+						setStatus("Cave: next room")
+						emptySince = nil
+						task.wait(2)
+					else
+						setStatus("Cave: waiting for bugs")
+						task.wait(0.5)
+					end
 				else
 					setStatus("Cave: waiting for bugs")
 					task.wait(0.3)
