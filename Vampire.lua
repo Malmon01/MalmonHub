@@ -52,7 +52,11 @@ local DANGER_MARGIN     = 3      -- ระยะเผื่อจากวง�
 local WEB_OFFSET        = 4      -- ระยะยืนตีใยหน้าถ้ำ
 local WEB_TIMEOUT       = 60
 local ENTER_WAIT        = 12     -- รอโหลดเข้าถ้ำนานสุด
-local INSIDE_GRACE      = 6      -- เพิ่งอยู่ในถ้ำไม่เกินกี่วิ = ยังถือว่าอยู่ข้างใน
+local INSIDE_GRACE      = 10     -- เพิ่งอยู่ในถ้ำไม่เกินกี่วิ = ยังถือว่าอยู่ข้างใน
+local ENEMY_RANGE       = 250    -- มอนในถ้ำที่ห่างไม่เกินนี้ถึงจะตี
+local DOOR_RANGE        = 400    -- ประตูใยที่ห่างไม่เกินนี้
+local CAVE_BITE_EXTRAS  = false  -- true = กัด Acorn / Geode ในถ้ำด้วย (หลังไม่มีมอนและประตู)
+local DOOR_WORDS        = { "web", "door" } -- ชื่อ/ป้ายที่มีคำนี้ = ประตูใย
 local PREFER_HIGH_TIER  = true
 local DEBUG_ATTR        = false  -- true = พิมพ์ Attribute มอนที่เปลี่ยน
 
@@ -572,49 +576,69 @@ local function inCaveRun()
 end
 
 --================ Cave: ในถ้ำ ================--
-local function getMyRun(root)
-	local folder = workspace:FindFirstChild("CaveRuns")
-	if not folder then return nil end
-	local best, bestDist
-	for _, m in ipairs(folder:GetChildren()) do
-		if m:IsA("Model") then
-			local origin = m:GetAttribute("Origin")
-			local pos = typeof(origin) == "Vector3" and origin or m:GetPivot().Position
-			local d = (pos - root.Position).Magnitude
-			if d < (bestDist or math.huge) then best, bestDist = m, d end
-		end
-	end
-	if best then return best, best.Name:match("^CaveRun_(.+)$") end
+-- กล่องขอบเขตของแต่ละถ้ำ (คำนวณครั้งเดียว)
+local runBoxes = setmetatable({}, { __mode = "k" })
+local function getRunBox(m)
+	local box = runBoxes[m]
+	if box then return box end
+	local ok, cf, size = pcall(function() return m:GetBoundingBox() end)
+	if not ok then return nil end
+	box = { cf = cf, size = size }
+	runBoxes[m] = box
+	return box
 end
 
-local function getCaveEnemies(id, root)
+-- ถ้ำที่ตัวเรายืนอยู่ข้างใน (ดูจากตำแหน่ง ไม่ต้องพึ่ง HUD)
+local function getRunAt(root)
+	local folder = workspace:FindFirstChild("CaveRuns")
+	if not folder then return nil end
+	for _, m in ipairs(folder:GetChildren()) do
+		if m:IsA("Model") and m.Name:match("^CaveRun_") then
+			local box = getRunBox(m)
+			if box then
+				local p = box.cf:PointToObjectSpace(root.Position)
+				local h = box.size / 2 + Vector3.new(40, 60, 40)
+				if math.abs(p.X) <= h.X and math.abs(p.Y) <= h.Y and math.abs(p.Z) <= h.Z then
+					return m
+				end
+			end
+		end
+	end
+end
+
+-- มอนทุกตัวในโฟลเดอร์ Enemies_* ที่อยู่ใกล้ตัว
+local function getCaveEnemies(root)
 	local list = {}
 	local runs = workspace:FindFirstChild("CaveRuns")
 	if not runs then return list end
-	local folder = runs:FindFirstChild("Enemies_" .. tostring(id))
-	local sources = folder and { folder } or {}
-	if not folder then
-		-- หาโฟลเดอร์ Enemies_ ที่ใกล้ตัวเราแทน
-		for _, f in ipairs(runs:GetChildren()) do
-			if f.Name:match("^Enemies_") then table.insert(sources, f) end
-		end
-	end
-	for _, f in ipairs(sources) do
-		for _, e in ipairs(f:GetChildren()) do
-			local hum = e:FindFirstChildOfClass("Humanoid")
-			local hrp = e:FindFirstChild("HumanoidRootPart")
-			if hum and hrp and hum.Health > 0
-				and (folder or (hrp.Position - root.Position).Magnitude < 600) then
-				table.insert(list, e)
+	for _, f in ipairs(runs:GetChildren()) do
+		if f.Name:match("^Enemies_") then
+			for _, e in ipairs(f:GetChildren()) do
+				local hum = e:FindFirstChildOfClass("Humanoid")
+				local hrp = e:FindFirstChild("HumanoidRootPart")
+				if hum and hrp and hum.Health > 0
+					and (hrp.Position - root.Position).Magnitude < ENEMY_RANGE then
+					table.insert(list, e)
+				end
 			end
 		end
 	end
 	return list
 end
 
--- ประตูใย / ของที่ต้องกัดในถ้ำ (มี BreakId + HP)
+local function isDoor(m)
+	local text = (m.Name .. " " .. tostring(m:GetAttribute("BreakId") or "") .. " "
+		.. tostring(m:GetAttribute("BarName") or "") .. " "
+		.. tostring(m:GetAttribute("BarSub") or "")):lower()
+	for _, w in ipairs(DOOR_WORDS) do
+		if text:find(w, 1, true) then return true end
+	end
+	return false
+end
+
+-- ประตูใยในถ้ำ (ถ้าเปิด CAVE_BITE_EXTRAS จะรวม Acorn / Geode ด้วย)
 local function getRunBreakable(run, root)
-	local best, bestDist
+	local bestDoor, doorDist, bestExtra, extraDist
 	local now = tick()
 	local function consider(m)
 		if not (m:IsA("Model") and m:GetAttribute("BreakId")) then return end
@@ -625,19 +649,21 @@ local function getRunBreakable(run, root)
 		local p = getMainPart(m)
 		if not p then return end
 		local d = (p.Position - root.Position).Magnitude
-		if d < (bestDist or math.huge) then best, bestDist = m, d end
+		if d > DOOR_RANGE then return end
+		if isDoor(m) then
+			if d < (doorDist or math.huge) then bestDoor, doorDist = m, d end
+		elseif CAVE_BITE_EXTRAS then
+			if d < (extraDist or math.huge) then bestExtra, extraDist = m, d end
+		end
 	end
 	if run then
 		for _, o in ipairs(run:GetDescendants()) do consider(o) end
 	end
 	local br = workspace:FindFirstChild("Breakables")
 	if br then
-		for _, o in ipairs(br:GetChildren()) do
-			local p = o:IsA("Model") and getMainPart(o)
-			if p and (p.Position - root.Position).Magnitude < 400 then consider(o) end
-		end
+		for _, o in ipairs(br:GetChildren()) do consider(o) end
 	end
-	return best
+	return bestDoor or bestExtra
 end
 
 local function nearestOf(root, list)
@@ -846,7 +872,8 @@ local function enterCave(cave)
 		-- รอจอโหลด ("3 LIVES ...") จนขึ้น HUD ในถ้ำ
 		local t = tick()
 		while tick() - t < ENTER_WAIT do
-			if inCaveRun() or getLobbyStart() then
+			local r = getRoot()
+			if (r and getRunAt(r)) or inCaveRun() or getLobbyStart() then
 				lastInside = tick()
 				return true
 			end
@@ -896,11 +923,11 @@ local function startCaveLoop()
 				continue
 			end
 
-			-- 3) อยู่ในถ้ำ
-			if inCaveRun() then
+			-- 3) อยู่ในถ้ำ (ดูจากตำแหน่ง หรือ HUD)
+			local run = getRunAt(root)
+			if run or inCaveRun() then
 				lastInside = tick()
-				local run, id = getMyRun(root)
-				local enemies = getCaveEnemies(id, root)
+				local enemies = getCaveEnemies(root)
 				if #enemies > 0 then
 					emptySince = nil
 					setStatus(("Cave: %d bugs left"):format(#enemies))
@@ -917,7 +944,7 @@ local function startCaveLoop()
 				end
 
 				emptySince = emptySince or tick()
-				if run and tick() - emptySince > 4 then
+				if run and tick() - emptySince > 6 then
 					setStatus("Cave: next room")
 					advanceRoom(run, root)
 					emptySince = nil
