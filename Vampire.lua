@@ -55,8 +55,9 @@ local ENTER_WAIT        = 12     -- รอโหลดเข้าถ้ำน�
 local INSIDE_GRACE      = 10     -- เพิ่งอยู่ในถ้ำไม่เกินกี่วิ = ยังถือว่าอยู่ข้างใน
 local ENEMY_RANGE       = 250    -- มอนในถ้ำที่ห่างไม่เกินนี้ถึงจะตี
 local DOOR_RANGE        = 400    -- ประตูใยที่ห่างไม่เกินนี้
-local CAVE_BITE_EXTRAS  = false  -- true = กัด Acorn / Geode ในถ้ำด้วย (หลังไม่มีมอนและประตู)
-local DOOR_WORDS        = { "web", "door" } -- ชื่อ/ป้ายที่มีคำนี้ = ประตูใย
+local CAVE_LOOT         = true   -- กัด Geode (เหรียญในถ้ำ) ก่อนกัดประตู
+local LOOT_RANGE        = 80     -- Geode ที่ห่างไม่เกินนี้ (กันวาร์ปทะลุไปห้องถัดไป)
+local CAVE_BITE_EXTRAS  = false  -- true = กัดของอื่น เช่น Acorn ด้วย (หลังไม่มีมอน/Geode/ประตู)
 local PREFER_HIGH_TIER  = true
 local DEBUG_ATTR        = false  -- true = พิมพ์ Attribute มอนที่เปลี่ยน
 
@@ -626,19 +627,9 @@ local function getCaveEnemies(root)
 	return list
 end
 
-local function isDoor(m)
-	local text = (m.Name .. " " .. tostring(m:GetAttribute("BreakId") or "") .. " "
-		.. tostring(m:GetAttribute("BarName") or "") .. " "
-		.. tostring(m:GetAttribute("BarSub") or "")):lower()
-	for _, w in ipairs(DOOR_WORDS) do
-		if text:find(w, 1, true) then return true end
-	end
-	return false
-end
-
--- ประตูใยในถ้ำ (ถ้าเปิด CAVE_BITE_EXTRAS จะรวม Acorn / Geode ด้วย)
+-- ของที่ต้องกัดในถ้ำ: Geode (CaveLoot) ใกล้ ๆ ก่อน -> ประตูใย (CaveDoor) -> ของอื่น
 local function getRunBreakable(run, root)
-	local bestDoor, doorDist, bestExtra, extraDist
+	local bestDoor, doorDist, bestLoot, lootDist, bestExtra, extraDist
 	local now = tick()
 	local function consider(m)
 		if not (m:IsA("Model") and m:GetAttribute("BreakId")) then return end
@@ -650,7 +641,12 @@ local function getRunBreakable(run, root)
 		if not p then return end
 		local d = (p.Position - root.Position).Magnitude
 		if d > DOOR_RANGE then return end
-		if isDoor(m) then
+		local id = tostring(m:GetAttribute("BreakId"))
+		if id == "CaveLoot" then
+			if CAVE_LOOT and d <= LOOT_RANGE and d < (lootDist or math.huge) then
+				bestLoot, lootDist = m, d
+			end
+		elseif id == "CaveDoor" then
 			if d < (doorDist or math.huge) then bestDoor, doorDist = m, d end
 		elseif CAVE_BITE_EXTRAS then
 			if d < (extraDist or math.huge) then bestExtra, extraDist = m, d end
@@ -659,11 +655,13 @@ local function getRunBreakable(run, root)
 	if run then
 		for _, o in ipairs(run:GetDescendants()) do consider(o) end
 	end
-	local br = workspace:FindFirstChild("Breakables")
-	if br then
-		for _, o in ipairs(br:GetChildren()) do consider(o) end
+	if CAVE_BITE_EXTRAS then
+		local br = workspace:FindFirstChild("Breakables")
+		if br then
+			for _, o in ipairs(br:GetChildren()) do consider(o) end
+		end
 	end
-	return bestDoor or bestExtra
+	return bestLoot or bestDoor or bestExtra
 end
 
 local function nearestOf(root, list)
