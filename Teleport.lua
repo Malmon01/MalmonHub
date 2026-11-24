@@ -7,17 +7,15 @@ local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local playerGui = player:WaitForChild("PlayerGui")
 local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
--- ================= ตั้งค่า (ห้ามปล่อยว่าง/nil) =================
+-- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = true
-local TOGGLE_KEY = Enum.KeyCode.E -- ตั้งเป็น nil ได้เฉพาะตรงนี้ เพราะมีเช็ก if TOGGLE_KEY then
-local MAGNET_RANGE = 45
-local COLLECT_RANGE = 5
-local MOVE_SPEED = 75
--- ============================================================
+local TOGGLE_KEY = Enum.KeyCode.E
+local MAGNET_RANGE = 120
+local COLLECT_RANGE = 8
+-- ==========================================
 
 local isEnabled = (DEFAULT_ENABLED == true)
 
--- ล้าง GUI เดิมก่อนสร้างใหม่ ป้องกันปุ่มซ้อน
 local existingGui = playerGui:FindFirstChild("OrbMagnetLocalGui")
 if existingGui then
 	existingGui:Destroy()
@@ -42,14 +40,10 @@ toggleBtn.BorderSizePixel = 0
 toggleBtn.ZIndex = 999
 toggleBtn.Parent = screenGui
 
-local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0, 10)
-corner.Parent = toggleBtn
-
-local stroke = Instance.new("UIStroke")
+Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 10)
+local stroke = Instance.new("UIStroke", toggleBtn)
 stroke.Color = Color3.fromRGB(15, 15, 15)
 stroke.Thickness = 2
-stroke.Parent = toggleBtn
 
 local function updateButton()
 	if isEnabled then
@@ -81,59 +75,42 @@ end
 local function getCharacterPos()
 	local char = player.Character
 	if not char then return nil end
-
 	local root = char:FindFirstChild("HumanoidRootPart")
 		or char.PrimaryPart
 		or char:FindFirstChildWhichIsA("BasePart", true)
-
-	if root and root:IsA("BasePart") then
-		return root.Position
-	end
-	return nil
+	return (root and root:IsA("BasePart")) and root.Position or nil
 end
 
-local function getOrbBasePart(obj)
+local function getOrbPart(obj)
 	if not obj or not obj.Parent then return nil end
-	if obj:IsA("BasePart") then
-		return obj
-	elseif obj:IsA("Model") then
+	if obj:IsA("BasePart") then return obj end
+	if obj:IsA("Model") then
 		return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
 	end
 	return nil
 end
 
-RunService.Heartbeat:Connect(function(dt)
+RunService.RenderStepped:Connect(function()
 	if not isEnabled then return end
-	if type(dt) ~= "number" or dt <= 0 then return end
-
 	local playerPos = getCharacterPos()
 	if not playerPos then return end
 
-	local children = orbsFolder:GetChildren()
-	for i = 1, #children do
-		local child = children[i]
-		local part = getOrbBasePart(child)
-
+	for _, child in ipairs(orbsFolder:GetChildren()) do
+		local part = getOrbPart(child)
 		if part and part.Parent then
 			local orbPos = child:IsA("Model") and child:GetPivot().Position or part.Position
-			local delta = playerPos - orbPos
-			local dist = delta.Magnitude
+			local dist = (orbPos - playerPos).Magnitude
 
 			if dist <= COLLECT_RANGE then
 				pcall(function()
 					child:Destroy()
 				end)
-			elseif dist <= MAGNET_RANGE and dist > 0.001 then
+			elseif dist <= MAGNET_RANGE then
 				pcall(function()
-					if part.Anchored then
-						part.Anchored = false
-					end
-					local step = math.min(MOVE_SPEED * dt, dist)
-					local nextPos = orbPos + (delta.Unit * step)
 					if child:IsA("Model") then
-						child:PivotTo(CFrame.new(nextPos))
+						child:PivotTo(CFrame.new(playerPos))
 					else
-						part.CFrame = CFrame.new(nextPos)
+						part.CFrame = CFrame.new(playerPos)
 					end
 				end)
 			end
