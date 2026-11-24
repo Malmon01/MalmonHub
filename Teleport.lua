@@ -1,119 +1,111 @@
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
 local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local playerGui = player:WaitForChild("PlayerGui")
-local orbsFolder = Workspace:WaitForChild("ClientOrbs")
+local orbsFolder = Workspace:WaitForChild("ClientOrbs") --[cite: 1]
 
 -- ================= ตั้งค่า =================
-local DEFAULT_ENABLED = true
-local TOGGLE_KEY = Enum.KeyCode.E
-local MAGNET_RANGE = 120
-local COLLECT_RANGE = 8
+local DEFAULT_ENABLED = false -- เริ่มต้นปิดไว้ก่อน กดปุ่มค่อยเปิด
+local TP_DELAY = 0.25         -- หน่วงเวลา (วินาที) ก่อนวาร์ปไป Orb ถัดไป
 -- ==========================================
 
 local isEnabled = (DEFAULT_ENABLED == true)
 
-local existingGui = playerGui:FindFirstChild("OrbMagnetLocalGui")
-if existingGui then
-	existingGui:Destroy()
+-- ลบปุ่มเก่าถ้ามี
+local oldGui = playerGui:FindFirstChild("OrbTpGui")
+if oldGui then
+	oldGui:Destroy()
 end
 
+-- สร้างปุ่มเปิด-ปิดด้านบนกลางจอ
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "OrbMagnetLocalGui"
+screenGui.Name = "OrbTpGui"
 screenGui.ResetOnSpawn = false
 screenGui.DisplayOrder = 9999
 screenGui.IgnoreGuiInset = true
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = playerGui
 
-local toggleBtn = Instance.new("TextButton")
-toggleBtn.Name = "ToggleBtn"
-toggleBtn.Size = UDim2.new(0, 176, 0, 40)
-toggleBtn.Position = UDim2.new(0.5, -88, 0, 16)
-toggleBtn.Font = Enum.Font.GothamBold
-toggleBtn.TextSize = 14
-toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-toggleBtn.BorderSizePixel = 0
-toggleBtn.ZIndex = 999
-toggleBtn.Parent = screenGui
+local btn = Instance.new("TextButton")
+btn.Name = "ToggleTpButton"
+btn.Size = UDim2.new(0, 170, 0, 40)
+btn.Position = UDim2.new(0.5, -85, 0, 16)
+btn.Font = Enum.Font.GothamBold
+btn.TextSize = 14
+btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+btn.BorderSizePixel = 0
+btn.ZIndex = 999
+btn.Parent = screenGui
 
-Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 10)
-local stroke = Instance.new("UIStroke", toggleBtn)
+Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 10)
+local stroke = Instance.new("UIStroke", btn)
 stroke.Color = Color3.fromRGB(15, 15, 15)
 stroke.Thickness = 2
 
-local function updateButton()
+local function updateBtn()
 	if isEnabled then
-		toggleBtn.Text = "ORB MAGNET: ON"
-		toggleBtn.BackgroundColor3 = Color3.fromRGB(39, 174, 96)
+		btn.Text = "TP ORB: ON"
+		btn.BackgroundColor3 = Color3.fromRGB(39, 174, 96)
 	else
-		toggleBtn.Text = "ORB MAGNET: OFF"
-		toggleBtn.BackgroundColor3 = Color3.fromRGB(192, 57, 43)
+		btn.Text = "TP ORB: OFF"
+		btn.BackgroundColor3 = Color3.fromRGB(192, 57, 43)
 	end
 end
 
-updateButton()
+updateBtn()
 
-toggleBtn.MouseButton1Click:Connect(function()
+btn.MouseButton1Click:Connect(function()
 	isEnabled = not isEnabled
-	updateButton()
+	updateBtn()
 end)
 
-if TOGGLE_KEY then
-	UserInputService.InputBegan:Connect(function(input, gameProcessed)
-		if gameProcessed then return end
-		if input.KeyCode == TOGGLE_KEY then
-			isEnabled = not isEnabled
-			updateButton()
-		end
-	end)
-end
-
-local function getCharacterPos()
-	local char = player.Character
-	if not char then return nil end
-	local root = char:FindFirstChild("HumanoidRootPart")
-		or char.PrimaryPart
-		or char:FindFirstChildWhichIsA("BasePart", true)
-	return (root and root:IsA("BasePart")) and root.Position or nil
-end
-
-local function getOrbPart(obj)
+-- หาตำแหน่งของ Orb
+local function getOrbPosition(obj)
 	if not obj or not obj.Parent then return nil end
-	if obj:IsA("BasePart") then return obj end
-	if obj:IsA("Model") then
-		return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
+	if obj:IsA("BasePart") then
+		return obj.Position
+	elseif obj:IsA("Model") then
+		return obj:GetPivot().Position
+	else
+		local part = obj:FindFirstChildWhichIsA("BasePart", true)
+		return part and part.Position or nil
 	end
-	return nil
 end
 
-RunService.RenderStepped:Connect(function()
-	if not isEnabled then return end
-	local playerPos = getCharacterPos()
-	if not playerPos then return end
+-- Teleport ตัวละครไปยังตำแหน่งเป้าหมาย
+local function teleportTo(pos)
+	local char = player.Character
+	if not char then return end
 
-	for _, child in ipairs(orbsFolder:GetChildren()) do
-		local part = getOrbPart(child)
-		if part and part.Parent then
-			local orbPos = child:IsA("Model") and child:GetPivot().Position or part.Position
-			local dist = (orbPos - playerPos).Magnitude
+	local targetCFrame = CFrame.new(pos + Vector3.new(0, 2, 0))
+	local root = char:FindFirstChild("HumanoidRootPart")
 
-			if dist <= COLLECT_RANGE then
-				pcall(function()
-					child:Destroy()
-				end)
-			elseif dist <= MAGNET_RANGE then
-				pcall(function()
-					if child:IsA("Model") then
-						child:PivotTo(CFrame.new(playerPos))
-					else
-						part.CFrame = CFrame.new(playerPos)
-					end
-				end)
+	if root and root:IsA("BasePart") then
+		root.CFrame = targetCFrame
+	elseif char.PrimaryPart then
+		char:PivotTo(targetCFrame)
+	else
+		pcall(function()
+			char:PivotTo(targetCFrame)
+		end)
+	end
+end
+
+-- ลูป Teleport ไปหา Orb ใน ClientOrbs
+task.spawn(function()
+	while true do
+		if isEnabled then
+			local children = orbsFolder:GetChildren()
+			for _, child in ipairs(children) do
+				if not isEnabled then break end
+				local orbPos = getOrbPosition(child)
+				if orbPos then
+					teleportTo(orbPos)
+					task.wait(TP_DELAY)
+				end
 			end
 		end
+		task.wait(0.1)
 	end
 end)
