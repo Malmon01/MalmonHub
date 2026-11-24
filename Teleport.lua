@@ -1,5 +1,4 @@
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local GuiService = game:GetService("GuiService")
 local Workspace = game:GetService("Workspace")
@@ -10,10 +9,10 @@ local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 1.1            -- หน่วงต่อการวาร์ป 1 ลูก (ปรับเพิ่ม/ลดได้)
-local MAX_SCAN_DISTANCE = 600   -- ระยะค้นหากว้างขึ้น เพื่อหาลูกที่ให้ EXP สูงสุด
-local MIN_TP_DISTANCE = 1.5     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
-local HEIGHT_OFFSET = 0.5       -- ระดับความสูงเหนือ Orb
+local TP_DELAY = 1.6            -- หน่วงเวลาต่อการวาร์ป 1 ครั้ง (แนะนำ 1.5 - 2.2 เพื่อไม่ให้เร็วไปจนโดนเตะ)
+local MAX_SCAN_DISTANCE = 220   -- ระยะค้นหา Orb (Studs)
+local MIN_TP_DISTANCE = 2.5     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
+local HEIGHT_OFFSET = 0.6       -- ความสูงเหนือ Orb
 local AUTO_REBIRTH_ENABLED = true
 local REBIRTH_COOLDOWN = 2.0
 -- ==========================================
@@ -51,30 +50,12 @@ local stroke = Instance.new("UIStroke", btn)
 stroke.Color = Color3.fromRGB(15, 15, 15)
 stroke.Thickness = 2
 
-local function getCharParts()
+local function getCharRoot()
 	local char = player.Character
-	if not char then return nil, nil end
-	local humanoid = char:FindFirstChildOfClass("Humanoid")
-	local root = char:FindFirstChild("HumanoidRootPart")
+	if not char then return nil end
+	return char:FindFirstChild("HumanoidRootPart")
 		or char.PrimaryPart
 		or char:FindFirstChildWhichIsA("BasePart", true)
-	return humanoid, root
-end
-
-local function stopAllMovement()
-	local humanoid, root = getCharParts()
-	pcall(function()
-		if humanoid then
-			humanoid.Jump = false
-			humanoid:Move(Vector3.zero, false)
-			if root and root:IsA("BasePart") then
-				humanoid:MoveTo(root.Position)
-			end
-		end
-		if root and root:IsA("BasePart") then
-			root.AssemblyLinearVelocity = Vector3.zero
-		end
-	end)
 end
 
 local function setState(state)
@@ -87,7 +68,6 @@ local function setState(state)
 	else
 		btn.Text = "TP ORB: OFF"
 		btn.BackgroundColor3 = Color3.fromRGB(192, 57, 43)
-		stopAllMovement()
 	end
 end
 
@@ -159,17 +139,6 @@ local function tryAutoRebirth()
 	end
 end
 
--- เดินหน้าต่อเนื่องเฉพาะตอนกดเปิด (หยุดทันทีเมื่อกดปิด)
-RunService.RenderStepped:Connect(function()
-	if not isEnabled then return end
-	local humanoid = getCharParts()
-	if humanoid then
-		pcall(function()
-			humanoid:Move(Vector3.new(0, 0, -1), true)
-		end)
-	end
-end)
-
 local function getOrbPosition(obj)
 	if not obj or not obj.Parent then return nil end
 	if obj:IsA("BasePart") then
@@ -182,7 +151,6 @@ local function getOrbPosition(obj)
 	end
 end
 
--- แปลงข้อความตัวเลขย่อเช่น "5.5M", "250K", "1.2B" เป็นตัวเลขจริง
 local function parseAbbreviatedNumber(raw)
 	if type(raw) == "number" then return raw end
 	if type(raw) ~= "string" then return nil end
@@ -214,14 +182,12 @@ local function isExpKeyword(nameStr)
 		or string.find(lower, "tier", 1, true)
 end
 
--- ประเมินค่า EXP / มูลค่าของ Orb แต่ละลูก เพื่อเลือกตัวที่ให้เยอะที่สุด
 local function getOrbExpScore(obj)
 	if not obj or not obj.Parent then return -math.huge end
 
 	local bestScore = 0
 	local foundExplicitValue = false
 
-	-- 1. เช็ก Attributes บนตัว Orb และลูกหลาน
 	local function scanAttributes(inst)
 		for attrName, attrVal in pairs(inst:GetAttributes()) do
 			if isExpKeyword(attrName) then
@@ -256,47 +222,24 @@ local function getOrbExpScore(obj)
 		return bestScore
 	end
 
-	-- 2. ถ้าไม่พบค่าตัวเลข EXP โดยตรง ให้คำนวณจากขนาด/สเกล (ลูกใหญ่และสเกลสูงมักให้ EXP เยอะกว่า)
-	local scaleMult = 1
-	if obj:IsA("Model") then
-		pcall(function()
-			scaleMult = obj:GetScale()
-		end)
-	end
-
-	local meshScaleVol = 0
-	for _, desc in ipairs(obj:GetDescendants()) do
-		if desc:IsA("SpecialMesh") then
-			local sc = desc.Scale
-			local v = sc.X * sc.Y * sc.Z
-			if v > meshScaleVol then
-				meshScaleVol = v
-			end
-		end
-	end
-
 	if obj:IsA("BasePart") then
 		local s = obj.Size
-		local vol = s.X * s.Y * s.Z
-		return math.max(vol, meshScaleVol) * scaleMult
+		return s.X * s.Y * s.Z
 	elseif obj:IsA("Model") then
 		local _, size = obj:GetBoundingBox()
-		local vol = size.X * size.Y * size.Z
-		return math.max(vol, meshScaleVol) * scaleMult
+		return size.X * size.Y * size.Z
 	else
 		local part = obj:FindFirstChildWhichIsA("BasePart", true)
 		if part then
 			local s = part.Size
-			local vol = s.X * s.Y * s.Z
-			return math.max(vol, meshScaleVol) * scaleMult
+			return s.X * s.Y * s.Z
 		end
 	end
 
-	return math.max(1, meshScaleVol) * scaleMult
+	return 1
 end
 
--- เลือกลูกที่ให้ EXP / มูลค่าสูงสุดในระยะ MAX_SCAN_DISTANCE
-local function findHighestExpOrbPos(currentPos)
+local function findBestOrbPos(currentPos)
 	local bestPos = nil
 	local bestScore = -math.huge
 	local bestTieDist = math.huge
@@ -333,7 +276,7 @@ local function waitInterruptible(seconds, token)
 end
 
 local function teleportToOrb(orbPos)
-	local _, root = getCharParts()
+	local root = getCharRoot()
 	if not root or not root:IsA("BasePart") then return end
 
 	local tpPos = orbPos + Vector3.new(0, HEIGHT_OFFSET, 0)
@@ -353,7 +296,7 @@ task.spawn(function()
 		if isEnabled then
 			tryAutoRebirth()
 		end
-		task.wait(0.4)
+		task.wait(0.5)
 	end
 end)
 
@@ -361,19 +304,15 @@ task.spawn(function()
 	while true do
 		if isEnabled then
 			local token = runToken
-			local _, root = getCharParts()
+			local root = getCharRoot()
 			if root and root:IsA("BasePart") then
-				local targetPos = findHighestExpOrbPos(root.Position)
+				local targetPos = findBestOrbPos(root.Position)
 				if targetPos then
 					teleportToOrb(targetPos)
 				end
 			end
-
-			if not waitInterruptible(TP_DELAY, token) then
-				stopAllMovement()
-			end
+			waitInterruptible(TP_DELAY, token)
 		else
-			stopAllMovement()
 			task.wait(0.2)
 		end
 	end
