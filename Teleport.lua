@@ -10,12 +10,12 @@ local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 0.9            -- หน่วงต่อรอบ (ปรับเพิ่ม/ลดได้)
-local MAX_SCAN_DISTANCE = 250   -- ระยะค้นหา Orb กว้างขึ้นมากๆ (Studs)
-local MAX_STEP_DISTANCE = 45    -- ระยะขยับสูงสุดต่อ 1 ครั้ง (กันกระโดดข้ามโซนจนหลุด/ติดหิน)
+local TP_DELAY = 0.85           -- หน่วงต่อรอบ (ปรับได้ตามความเหมาะ)
+local MAX_SCAN_DISTANCE = 260   -- ระยะค้นหากว้าง
+local MAX_STEP_DISTANCE = 90    -- ขยับเข้าหาได้ไกลขึ้นต่อครั้ง กันติดหิน
 local MIN_TP_DISTANCE = 2.5     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
-local MAX_DROP_HEIGHT = 8       -- กันวาร์ปลงจุดที่ต่ำกว่าตัวละครเกินไป
-local HEIGHT_OFFSET = 0.6       -- ความสูงเหนือ Orb
+local MAX_DROP_HEIGHT = 18      -- ยอมให้ลงจุดที่ต่ำกว่าก้อนหิน/เนินได้มากขึ้น
+local HEIGHT_OFFSET = 0.8       -- ความสูงเหนือเป้าหมาย
 local AUTO_REBIRTH_ENABLED = true
 local REBIRTH_COOLDOWN = 2.0
 -- ==========================================
@@ -24,6 +24,8 @@ local isEnabled = (DEFAULT_ENABLED == true)
 local runToken = 0
 local lastRebirthTime = 0
 local currentGoalPos = nil
+local lastStuckCheckPos = nil
+local stuckTimer = 0
 
 local oldGui = playerGui:FindFirstChild("OrbTpGui")
 if oldGui then
@@ -66,9 +68,12 @@ end
 
 local function stopAllMovement()
 	currentGoalPos = nil
+	lastStuckCheckPos = nil
+	stuckTimer = 0
 	local humanoid, root = getCharParts()
 	pcall(function()
 		if humanoid then
+			humanoid.Jump = false
 			humanoid:Move(Vector3.zero, false)
 			if root and root:IsA("BasePart") then
 				humanoid:MoveTo(root.Position)
@@ -162,9 +167,11 @@ local function tryAutoRebirth()
 	end
 end
 
--- เดินหน้าต่อเนื่องเฉพาะตอนกดเปิด (หยุดทันทีเมื่อกดปิด)
-RunService.Heartbeat:Connect(function()
+-- เดินหน้าต่อเนื่อง + กระโดดข้ามหินอัตโนมัติเมื่อติดขัด
+RunService.Heartbeat:Connect(function(dt)
 	if not isEnabled then return end
+	if type(dt) ~= "number" or dt <= 0 then return end
+
 	local humanoid, root = getCharParts()
 	if not humanoid or not root or not root:IsA("BasePart") then return end
 
@@ -173,33 +180,75 @@ RunService.Heartbeat:Connect(function()
 		if currentGoalPos then
 			humanoid:MoveTo(currentGoalPos)
 		end
+
+		-- ตรวจจับว่าติดก้อนหิน/ขอบผาหรือไม่ ถ้าขยับน้อยมากให้กระโดดข้าม
+		if lastStuckCheckPos then
+			local moved = (root.Position - lastStuckCheckPos).Magnitude
+			if moved < 0.8 then
+				stuckTimer += dt
+				if stuckTimer >= 0.35 then
+					humanoid.Jump = true
+					stuckTimer = 0
+				end
+			else
+				stuckTimer = 0
+			end
+		end
+		lastStuckCheckPos = root.Position
 	end)
 end)
 
-local function getOrbPosition(obj)
+local function getObjectPosition(obj)
 	if not obj or not obj.Parent then return nil end
 	if obj:IsA("BasePart") then
 		return obj.Position
 	elseif obj:IsA("Model") then
 		return obj:GetPivot().Position
+	elseif obj:IsA("Attachment") then
+		return obj.WorldPosition
 	else
 		local part = obj:FindFirstChildWhichIsA("BasePart", true)
 		return part and part.Position or nil
 	end
 end
 
-local function findNearestOrbPos(currentPos)
+local function findNearestTargetPos(currentPos)
 	local bestPos = nil
 	local bestDist = MAX_SCAN_DISTANCE
 
+	-- 1. ค้นหาใน Workspace.ClientOrbs
 	for _, child in ipairs(orbsFolder:GetChildren()) do
-		local orbPos = getOrbPosition(child)
-		if orbPos then
-			local isTooLow = orbPos.Y < (currentPos.Y - MAX_DROP_HEIGHT)
-			local dist = (orbPos - currentPos).Magnitude
+		local pos = getObjectPosition(child)
+		if pos then
+			local isTooLow = pos.Y < (currentPos.Y - MAX_DROP_HEIGHT)
+			local dist = (pos - currentPos).Magnitude
 			if not isTooLow and dist >= MIN_TP_DISTANCE and dist <= bestDist then
 				bestDist = dist
-				bestPos = orbPos
+				bestPos = pos
+			end
+		end
+	end
+
+	-- 2. หากไม่เจอใน ClientOrbs ลองเช็กตัวชี้เป้าหมาย/ลูกศรใน Workspace.ClientFx
+	if not bestPos then
+		local fxFolder = Workspace:FindFirstChild("ClientFx")
+		if fxFolder then
+			for _, desc in ipairs(fxFolder:GetDescendants()) do
+				local nameLower = string.lower(desc.Name)
+				if string.find(nameLower, "arrow", 1, true)
+					or string.find(nameLower, "orb", 1, true)
+					or string.find(nameLower, "target", 1, true)
+					or string.find(nameLower, "goal", 1, true) then
+					local pos = getObjectPosition(desc)
+					if pos then
+						local isTooLow = pos.Y < (currentPos.Y - MAX_DROP_HEIGHT)
+						local dist = (pos - currentPos).Magnitude
+						if not isTooLow and dist >= MIN_TP_DISTANCE and dist <= bestDist then
+							bestDist = dist
+							bestPos = pos
+						end
+					end
+				end
 			end
 		end
 	end
@@ -220,20 +269,19 @@ local function waitInterruptible(seconds, token)
 	return isEnabled and (token == runToken)
 end
 
-local function stepTowardOrb(orbPos)
+local function stepTowardTarget(targetPos)
 	local _, root = getCharParts()
 	if not root or not root:IsA("BasePart") then return end
 
-	currentGoalPos = orbPos
-	local delta = orbPos - root.Position
+	currentGoalPos = targetPos
+	local delta = targetPos - root.Position
 	local dist = delta.Magnitude
 	if dist <= 0.01 then return end
 
-	-- ขยับเข้าหาไม่เกิน MAX_STEP_DISTANCE ต่อครั้ง แม้ระยะสแกนจะกว้าง 250 ก็ตาม
 	local moveDist = math.min(MAX_STEP_DISTANCE, dist)
 	local stepPos = root.Position + (delta.Unit * moveDist)
 	local tpPos = stepPos + Vector3.new(0, HEIGHT_OFFSET, 0)
-	local lookTarget = Vector3.new(orbPos.X, tpPos.Y, orbPos.Z)
+	local lookTarget = Vector3.new(targetPos.X, tpPos.Y, targetPos.Z)
 	local lookCFrame = (lookTarget - tpPos).Magnitude > 0.01
 		and CFrame.lookAt(tpPos, lookTarget)
 		or CFrame.new(tpPos)
@@ -259,9 +307,9 @@ task.spawn(function()
 			local token = runToken
 			local _, root = getCharParts()
 			if root and root:IsA("BasePart") then
-				local targetPos = findNearestOrbPos(root.Position)
+				local targetPos = findNearestTargetPos(root.Position)
 				if targetPos then
-					stepTowardOrb(targetPos)
+					stepTowardTarget(targetPos)
 				end
 			end
 
