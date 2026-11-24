@@ -1,5 +1,7 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local GuiService = game:GetService("GuiService")
 local Workspace = game:GetService("Workspace")
 
 local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
@@ -8,13 +10,16 @@ local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 0.2          -- ความเร็วรอบการวาร์ป (ยิ่งน้อยยิ่งวาร์ปไว 0.15 - 0.3 กำลังดี)
-local WALK_SPEED_BOOST = 28   -- ความเร็วในการจำลองการเดินหน้าต่อเนื่อง
+local TP_DELAY = 1.2          -- หน่วงเวลา (วินาที) ต่อรอบ ให้คะแนนขึ้นทัน (เพิ่มได้ถ้ายังไวไป)
+local WALK_SPEED_BOOST = 14   -- ความเร็วเดินหน้าต่อเนื่องตอนเปิด (ลด/เพิ่มได้)
 local HEIGHT_OFFSET = 2.5     -- ความสูงตอนวาร์ปเหนือ Orb
+local AUTO_REBIRTH_ENABLED = true
+local REBIRTH_COOLDOWN = 2.0  -- เวลารอหลังกด Rebirth ก่อนเช็กซ้ำ (วินาที)
 -- ==========================================
 
 local isEnabled = (DEFAULT_ENABLED == true)
 local runToken = 0
+local lastRebirthTime = 0
 
 local oldGui = playerGui:FindFirstChild("OrbTpGui")
 if oldGui then
@@ -90,7 +95,73 @@ btn.MouseButton1Click:Connect(function()
 	setState(not isEnabled)
 end)
 
--- เดินหน้าต่อเนื่องตลอดเวลาที่กดเปิด (กันสคริปต์เกมตัดจังหวะให้เดินๆ หยุดๆ)
+-- เช็กว่า GuiObject ทั้งสายมองเห็นอยู่จริงบนหน้าจอหรือไม่
+local function isGuiReallyVisible(guiObj)
+	local current = guiObj
+	while current and current ~= playerGui do
+		if current:IsA("GuiObject") and not current.Visible then
+			return false
+		end
+		current = current.Parent
+	end
+	return true
+end
+
+-- ยิงสัญญาณคลิกที่ตำแหน่งกลางปุ่มบนหน้าจอ
+local function clickGuiCenter(guiObj)
+	local absPos = guiObj.AbsolutePosition
+	local absSize = guiObj.AbsoluteSize
+	if absSize.X <= 1 or absSize.Y <= 1 then return false end
+
+	local inset = GuiService:GetGuiInset()
+	local x = absPos.X + (absSize.X * 0.5) + inset.X
+	local y = absPos.Y + (absSize.Y * 0.5) + inset.Y
+
+	pcall(function()
+		VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
+		task.wait(0.05)
+		VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
+	end)
+	return true
+end
+
+-- ค้นหาปุ่ม REBIRTH! ที่ขึ้นเมื่อพลังตันและกดให้โดยอัตโนมัติ
+local function tryAutoRebirth()
+	if not AUTO_REBIRTH_ENABLED or not isEnabled then return end
+	if os.clock() - lastRebirthTime < REBIRTH_COOLDOWN then return end
+
+	for _, gui in ipairs(playerGui:GetChildren()) do
+		if gui ~= screenGui and gui:IsA("ScreenGui") and gui.Enabled then
+			for _, desc in ipairs(gui:GetDescendants()) do
+				if desc:IsA("TextLabel") or desc:IsA("TextButton") then
+					local upperText = string.upper(desc.Text or "")
+					if string.find(upperText, "REBIRTH", 1, true) and isGuiReallyVisible(desc) then
+						-- มองหาปุ่มที่กดได้ (ตัวมันเอง หรือ Parent ที่เป็นปุ่ม)
+						local clickable = nil
+						if desc:IsA("GuiButton") and desc.Active then
+							clickable = desc
+						elseif desc.Parent and desc.Parent:IsA("GuiButton") and desc.Parent.Active then
+							clickable = desc.Parent
+						end
+
+						if clickable and clickable.AbsoluteSize.X > 20 then
+							lastRebirthTime = os.clock()
+							clickGuiCenter(clickable)
+							pcall(function()
+								VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
+								task.wait(0.05)
+								VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.R, false, game)
+							end)
+							return
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+-- เดินหน้าต่อเนื่องเฉพาะตอนกดเปิด (หยุดทันทีเมื่อกดปิด)
 RunService.Heartbeat:Connect(function(dt)
 	if not isEnabled then return end
 	if type(dt) ~= "number" or dt <= 0 then return end
@@ -140,7 +211,17 @@ local function teleportToOrb(orbPos)
 	end)
 end
 
--- ลูปวาร์ปไปหา Orb ใน ClientOrbs แบบต่อเนื่องไม่ติดระยะสแกนแคบ
+-- ลูป Auto Rebirth แยกต่างหาก จะทำงานเฉพาะตอนเปิดระบบ
+task.spawn(function()
+	while true do
+		if isEnabled then
+			tryAutoRebirth()
+		end
+		task.wait(0.4)
+	end
+end)
+
+-- ลูปวาร์ปไปหา Orb แบบช้าลงให้คะแนนขึ้นทัน
 task.spawn(function()
 	while true do
 		if isEnabled then
@@ -160,13 +241,13 @@ task.spawn(function()
 						if not isEnabled or token ~= runToken then
 							break
 						end
-						task.wait(0.05)
-						waited += 0.05
+						task.wait(0.1)
+						waited += 0.1
 					end
 				end
 			end
 
-			task.wait(0.05)
+			task.wait(0.1)
 		else
 			stopAllMovement()
 			task.wait(0.2)
