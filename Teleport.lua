@@ -1,4 +1,5 @@
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
@@ -7,14 +8,13 @@ local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 0.8          -- หน่วงเวลา 3 วินาทีต่อรอบ
-local WALK_DURATION = 1.2     -- ระยะเวลาจำลองการเดินหน้าต่อรอบ (วินาที)
+local TP_DELAY = 1            -- หน่วงเวลา 1 วินาทีต่อรอบ
 local MAX_SCAN_DISTANCE = 100 -- ระยะค้นหา Orb (Studs)
 local HEIGHT_OFFSET = 2.5     -- ความสูงตอนวาร์ปเหนือ Orb
 -- ==========================================
 
 local isEnabled = (DEFAULT_ENABLED == true)
-local runToken = 0 -- ใช้ตัดลูปทันทีเมื่อกดปิด
+local runToken = 0
 
 local oldGui = playerGui:FindFirstChild("OrbTpGui")
 if oldGui then
@@ -55,22 +55,22 @@ local function getCharParts()
 	return humanoid, root
 end
 
--- สั่งหยุดเดินทันทีเมื่อปิดระบบ
-local function stopWalking()
+-- หยุดเดินทันทีเมื่อปิด
+local function stopForwardWalk()
 	local humanoid, root = getCharParts()
 	pcall(function()
 		if humanoid then
+			humanoid:Move(Vector3.zero, false)
 			if root and root:IsA("BasePart") then
 				humanoid:MoveTo(root.Position)
 			end
-			humanoid:Move(Vector3.zero, false)
 		end
 	end)
 end
 
 local function setState(state)
 	isEnabled = (state == true)
-	runToken += 1 -- เปลี่ยน token เพื่อยกเลิกการทำงานของรอบเก่าทันที
+	runToken += 1
 
 	if isEnabled then
 		btn.Text = "TP ORB: ON"
@@ -78,7 +78,7 @@ local function setState(state)
 	else
 		btn.Text = "TP ORB: OFF"
 		btn.BackgroundColor3 = Color3.fromRGB(192, 57, 43)
-		stopWalking()
+		stopForwardWalk()
 	end
 end
 
@@ -86,6 +86,17 @@ setState(isEnabled)
 
 btn.MouseButton1Click:Connect(function()
 	setState(not isEnabled)
+end)
+
+-- จำลองการกด W ค้างไว้ (เดินหน้าตลอดเวลาที่เปิดอยู่)
+RunService.RenderStepped:Connect(function()
+	if not isEnabled then return end
+	local humanoid = getCharParts()
+	if humanoid then
+		pcall(function()
+			humanoid:Move(Vector3.new(0, 0, -1), true)
+		end)
+	end
 end)
 
 local function getOrbPosition(obj)
@@ -118,7 +129,6 @@ local function findNearestOrbPos(currentPos)
 	return bestPos
 end
 
--- หน่วงเวลาแบบเช็กสถานะตลอดเวลา หากกดปิดจะหยุดรอทันที
 local function waitInterruptible(seconds, token)
 	local elapsed = 0
 	while elapsed < seconds do
@@ -132,12 +142,11 @@ local function waitInterruptible(seconds, token)
 	return isEnabled and (token == runToken)
 end
 
-local function teleportAndWalkForward(orbPos, token)
-	local humanoid, root = getCharParts()
+local function teleportToOrb(orbPos, token)
+	local _, root = getCharParts()
 	if not root or not root:IsA("BasePart") then return end
 	if not isEnabled or token ~= runToken then return end
 
-	-- วาร์ปไปจุดเป้าหมายและหันหน้าไปทาง Orb
 	local tpPos = orbPos + Vector3.new(0, HEIGHT_OFFSET, 0)
 	local lookTarget = Vector3.new(orbPos.X, tpPos.Y, orbPos.Z)
 	local lookCFrame = (lookTarget - tpPos).Magnitude > 0.01
@@ -148,24 +157,6 @@ local function teleportAndWalkForward(orbPos, token)
 		root.AssemblyLinearVelocity = Vector3.zero
 		root.CFrame = lookCFrame
 	end)
-
-	-- จำลองการเดินหน้าต่อช่วงสั้นๆ เฉพาะตอนเปิดอยู่
-	local walkElapsed = 0
-	while walkElapsed < WALK_DURATION do
-		if not isEnabled or token ~= runToken then
-			stopWalking()
-			return
-		end
-		humanoid, root = getCharParts()
-		if humanoid and root and root:IsA("BasePart") then
-			local forwardGoal = root.Position + (root.CFrame.LookVector * 6)
-			humanoid:MoveTo(forwardGoal)
-		end
-		task.wait(0.1)
-		walkElapsed += 0.1
-	end
-
-	stopWalking()
 end
 
 task.spawn(function()
@@ -176,16 +167,15 @@ task.spawn(function()
 			if root and root:IsA("BasePart") then
 				local targetPos = findNearestOrbPos(root.Position)
 				if targetPos then
-					teleportAndWalkForward(targetPos, token)
+					teleportToOrb(targetPos, token)
 				end
 			end
 
-			-- หน่วง 3 วินาทีก่อนเริ่มรอบถัดไป
 			if not waitInterruptible(TP_DELAY, token) then
-				stopWalking()
+				stopForwardWalk()
 			end
 		else
-			stopWalking()
+			stopForwardWalk()
 			task.wait(0.2)
 		end
 	end
