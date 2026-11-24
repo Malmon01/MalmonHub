@@ -8,57 +8,70 @@ local playerGui = player:WaitForChild("PlayerGui")
 local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
-local DEFAULT_ENABLED = true   -- สถานะเริ่มต้น (true = เปิด, false = ปิด)
-local TOGGLE_KEY = Enum.KeyCode.E -- ปุ่มคีย์บอร์ดสำหรับเปิด/ปิด (เปลี่ยนเป็น nil ได้ถ้าไม่ใช้)
-local MAGNET_RANGE = 25      -- ระยะเริ่มดูด (Studs)
-local COLLECT_RANGE = 3      -- ระยะเก็บเข้าตัว (Studs)
-local MOVE_SPEED = 50        -- ความเร็วในการดูดเข้าหาตัว
+local DEFAULT_ENABLED = true
+local TOGGLE_KEY = Enum.KeyCode.E
+local MAGNET_RANGE = 40      -- เพิ่มระยะดูดให้กว้างขึ้น (ปรับได้)
+local COLLECT_RANGE = 5      -- ระยะเก็บ
+local MOVE_SPEED = 70        -- ความเร็วดูด
+local DEBUG_LOG = false      -- เปลี่ยนเป็น true หากอยากดู log ใน Output
 -- ==========================================
 
 local isEnabled = DEFAULT_ENABLED
 
--- สร้างปุ่มเปิด-ปิดบนหน้าจอ (ScreenGui + TextButton)
+-- ลบ GUI เก่าถ้ามีอยู่แล้ว เพื่อไม่ให้ซ้อนกัน
+local oldGui = playerGui:FindFirstChild("OrbAutoCollectGui")
+if oldGui then oldGui:Destroy() end
+
+-- สร้างปุ่มบนจอให้อยู่ด้านบนกลาง และลอยทับ UI เกม
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "OrbAutoCollectGui"
 screenGui.ResetOnSpawn = false
+screenGui.DisplayOrder = 999
+screenGui.IgnoreGuiInset = true
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = playerGui
 
 local toggleButton = Instance.new("TextButton")
 toggleButton.Name = "ToggleOrbButton"
-toggleButton.Size = UDim2.new(0, 170, 0, 44)
-toggleButton.Position = UDim2.new(0, 20, 0.5, -22) -- อยู่ฝั่งซ้ายกลางจอ (ลากย้ายที่ในโค้ดได้)
+toggleButton.Size = UDim2.new(0, 180, 0, 42)
+toggleButton.Position = UDim2.new(0.5, -90, 0, 14) -- ด้านบนกลางจอ ไม่โดนเมนูซ้ายบัง
 toggleButton.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
 toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
 toggleButton.Font = Enum.Font.GothamBold
 toggleButton.TextSize = 15
 toggleButton.BorderSizePixel = 0
+toggleButton.ZIndex = 100
 toggleButton.Parent = screenGui
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(20, 20, 20)
+stroke.Thickness = 2
+stroke.Parent = toggleButton
 
 local corner = Instance.new("UICorner")
 corner.CornerRadius = UDim.new(0, 10)
 corner.Parent = toggleButton
 
--- ฟังก์ชันอัปเดตสถานะเปิด/ปิด และสีของปุ่ม
 local function setEnabled(state)
 	isEnabled = state
 	if isEnabled then
 		toggleButton.Text = "Orb Collect: ON"
-		toggleButton.BackgroundColor3 = Color3.fromRGB(46, 204, 113) -- สีเขียว
+		toggleButton.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
 	else
 		toggleButton.Text = "Orb Collect: OFF"
-		toggleButton.BackgroundColor3 = Color3.fromRGB(231, 76, 60) -- สีแดง
+		toggleButton.BackgroundColor3 = Color3.fromRGB(231, 76, 60)
+	end
+	if DEBUG_LOG then
+		print("[OrbCollect] Status =", isEnabled, "| Orbs count =", #orbsFolder:GetChildren())
 	end
 end
 
--- ตั้งค่าเริ่มต้นตามตัวแปร DEFAULT_ENABLED
 setEnabled(isEnabled)
 
--- กดปุ่มที่หน้าจอเพื่อสลับเปิด/ปิด
 toggleButton.MouseButton1Click:Connect(function()
 	setEnabled(not isEnabled)
 end)
 
--- กดปุ่มคีย์บอร์ดเพื่อสลับเปิด/ปิด
 if TOGGLE_KEY then
 	UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if gameProcessed then return end
@@ -68,26 +81,47 @@ if TOGGLE_KEY then
 	end)
 end
 
--- ลูปทำงานหลักสำหรับดูดและเก็บ Orb ใน Workspace.ClientOrbs
-RunService.Heartbeat:Connect(function(dt)
-	if not isEnabled then return end -- ถ้าปิดอยู่ จะไม่ทำงาน
-
+-- หาตำแหน่งตัวละครของผู้เล่น (รองรับทั้งมด/ตัวละครที่ไม่มี HumanoidRootPart)
+local function getTargetPosition()
 	local character = player.Character
-	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
-	if not rootPart then return end
+	if not character then return nil end
 
-	local playerPos = rootPart.Position
+	local root = character:FindFirstChild("HumanoidRootPart")
+		or character.PrimaryPart
+		or character:FindFirstChildWhichIsA("BasePart", true)
 
-	for _, orb in ipairs(orbsFolder:GetChildren()) do
-		if orb:IsA("BasePart") and orb.Name == "Orb" then
-			local distance = (orb.Position - playerPos).Magnitude
+	return root and root.Position or nil
+end
+
+-- ดึง Part หลักของ Orb (รองรับทั้ง BasePart และ Model)
+local function getOrbPart(item)
+	if item:IsA("BasePart") then
+		return item
+	elseif item:IsA("Model") then
+		return item.PrimaryPart or item:FindFirstChildWhichIsA("BasePart", true)
+	end
+	return nil
+end
+
+RunService.Heartbeat:Connect(function(dt)
+	if not isEnabled then return end
+
+	local playerPos = getTargetPosition()
+	if not playerPos then return end
+
+	for _, child in ipairs(orbsFolder:GetChildren()) do
+		local orbPart = getOrbPart(child)
+		if orbPart and orbPart.Parent then
+			local distance = (orbPart.Position - playerPos).Magnitude
 
 			if distance <= COLLECT_RANGE then
-				-- [ใส่โค้ดเพิ่มคะแนน / เล่นเสียง / ส่ง RemoteEvent ไป Server ตรงนี้]
-				orb:Destroy()
+				child:Destroy()
 			elseif distance <= MAGNET_RANGE then
-				local direction = (playerPos - orb.Position).Unit
-				orb.Position += direction * MOVE_SPEED * dt
+				if orbPart.Anchored then
+					orbPart.Anchored = false
+				end
+				local direction = (playerPos - orbPart.Position).Unit
+				orbPart.Position += direction * MOVE_SPEED * dt
 			end
 		end
 	end
