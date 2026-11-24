@@ -7,7 +7,7 @@ local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 1.5            -- หน่วงเวลา 3 วินาทีต่อรอบ
+local TP_DELAY = 0.8          -- หน่วงเวลา 3 วินาทีต่อรอบ
 local WALK_DURATION = 1.2     -- ระยะเวลาจำลองการเดินหน้าต่อรอบ (วินาที)
 local MAX_SCAN_DISTANCE = 100 -- ระยะค้นหา Orb (Studs)
 local HEIGHT_OFFSET = 2.5     -- ความสูงตอนวาร์ปเหนือ Orb
