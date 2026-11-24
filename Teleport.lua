@@ -3,21 +3,16 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 local GuiService = game:GetService("GuiService")
 local Workspace = game:GetService("Workspace")
 
-local player = Players.LocalPlayer
-while not player do
-	Players.PlayerAdded:Wait()
-	player = Players.LocalPlayer
-end
-
+local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local playerGui = player:WaitForChild("PlayerGui")
+local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 1.35
-local MAX_SCAN_DISTANCE = 95
-local MIN_TP_DISTANCE = 2.0
-local DISTANCE_PENALTY = 18
-local HEIGHT_OFFSET = 0.5
+local TP_DELAY = 1.6            -- หน่วงเวลาต่อการวาร์ป 1 ครั้ง (แนะนำ 1.5 - 2.2 เพื่อไม่ให้เร็วไปจนโดนเตะ)
+local MAX_SCAN_DISTANCE = 220   -- ระยะค้นหา Orb (Studs)
+local MIN_TP_DISTANCE = 2.5     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
+local HEIGHT_OFFSET = 0.6       -- ความสูงเหนือ Orb
 local AUTO_REBIRTH_ENABLED = true
 local REBIRTH_COOLDOWN = 2.0
 -- ==========================================
@@ -26,17 +21,15 @@ local isEnabled = (DEFAULT_ENABLED == true)
 local runToken = 0
 local lastRebirthTime = 0
 
-pcall(function()
-	local oldGui = playerGui:FindFirstChild("OrbTpGui")
-	if oldGui then
-		oldGui:Destroy()
-	end
-end)
+local oldGui = playerGui:FindFirstChild("OrbTpGui")
+if oldGui then
+	oldGui:Destroy()
+end
 
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "OrbTpGui"
 screenGui.ResetOnSpawn = false
-screenGui.DisplayOrder = 2147483647
+screenGui.DisplayOrder = 9999
 screenGui.IgnoreGuiInset = true
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = playerGui
@@ -48,42 +41,14 @@ btn.Position = UDim2.new(0.5, -88, 0, 16)
 btn.Font = Enum.Font.GothamBold
 btn.TextSize = 14
 btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-btn.BackgroundColor3 = Color3.fromRGB(192, 57, 43)
-btn.Text = "TP ORB: OFF"
 btn.BorderSizePixel = 0
-btn.Active = true
-btn.AutoButtonColor = true
-btn.ZIndex = 2147483647
+btn.ZIndex = 999
 btn.Parent = screenGui
 
-pcall(function()
-	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 10)
-	local stroke = Instance.new("UIStroke", btn)
-	stroke.Color = Color3.fromRGB(15, 15, 15)
-	stroke.Thickness = 2
-end)
-
-local function refreshButtonVisual()
-	pcall(function()
-		if isEnabled then
-			btn.Text = "TP ORB: ON"
-			btn.BackgroundColor3 = Color3.fromRGB(39, 174, 96)
-		else
-			btn.Text = "TP ORB: OFF"
-			btn.BackgroundColor3 = Color3.fromRGB(192, 57, 43)
-		end
-	end)
-end
-
-local function toggleState()
-	isEnabled = not isEnabled
-	runToken += 1
-	refreshButtonVisual()
-end
-
-refreshButtonVisual()
-btn.MouseButton1Click:Connect(toggleState)
-btn.Activated:Connect(toggleState)
+Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 10)
+local stroke = Instance.new("UIStroke", btn)
+stroke.Color = Color3.fromRGB(15, 15, 15)
+stroke.Thickness = 2
 
 local function getCharRoot()
 	local char = player.Character
@@ -92,6 +57,25 @@ local function getCharRoot()
 		or char.PrimaryPart
 		or char:FindFirstChildWhichIsA("BasePart", true)
 end
+
+local function setState(state)
+	isEnabled = (state == true)
+	runToken += 1
+
+	if isEnabled then
+		btn.Text = "TP ORB: ON"
+		btn.BackgroundColor3 = Color3.fromRGB(39, 174, 96)
+	else
+		btn.Text = "TP ORB: OFF"
+		btn.BackgroundColor3 = Color3.fromRGB(192, 57, 43)
+	end
+end
+
+setState(isEnabled)
+
+btn.MouseButton1Click:Connect(function()
+	setState(not isEnabled)
+end)
 
 local function isGuiReallyVisible(guiObj)
 	local current = guiObj
@@ -199,7 +183,7 @@ local function isExpKeyword(nameStr)
 end
 
 local function getOrbExpScore(obj)
-	if not obj or not obj.Parent then return 0 end
+	if not obj or not obj.Parent then return -math.huge end
 
 	local bestScore = 0
 	local foundExplicitValue = false
@@ -256,21 +240,19 @@ local function getOrbExpScore(obj)
 end
 
 local function findBestOrbPos(currentPos)
-	local orbsFolder = Workspace:FindFirstChild("ClientOrbs")
-	if not orbsFolder then return nil end
-
 	local bestPos = nil
-	local bestWeightedScore = -math.huge
+	local bestScore = -math.huge
+	local bestTieDist = math.huge
 
 	for _, child in ipairs(orbsFolder:GetChildren()) do
 		local orbPos = getOrbPosition(child)
 		if orbPos then
 			local dist = (orbPos - currentPos).Magnitude
 			if dist >= MIN_TP_DISTANCE and dist <= MAX_SCAN_DISTANCE then
-				local rawScore = math.max(1, getOrbExpScore(child))
-				local weightedScore = rawScore / (1 + (dist / DISTANCE_PENALTY))
-				if weightedScore > bestWeightedScore then
-					bestWeightedScore = weightedScore
+				local score = getOrbExpScore(child)
+				if (score > bestScore) or (math.abs(score - bestScore) <= 1e-6 and dist < bestTieDist) then
+					bestScore = score
+					bestTieDist = dist
 					bestPos = orbPos
 				end
 			end
@@ -312,7 +294,7 @@ end
 task.spawn(function()
 	while true do
 		if isEnabled then
-			pcall(tryAutoRebirth)
+			tryAutoRebirth()
 		end
 		task.wait(0.5)
 	end
@@ -322,15 +304,13 @@ task.spawn(function()
 	while true do
 		if isEnabled then
 			local token = runToken
-			pcall(function()
-				local root = getCharRoot()
-				if root and root:IsA("BasePart") then
-					local targetPos = findBestOrbPos(root.Position)
-					if targetPos then
-						teleportToOrb(targetPos)
-					end
+			local root = getCharRoot()
+			if root and root:IsA("BasePart") then
+				local targetPos = findBestOrbPos(root.Position)
+				if targetPos then
+					teleportToOrb(targetPos)
 				end
-			end)
+			end
 			waitInterruptible(TP_DELAY, token)
 		else
 			task.wait(0.2)
