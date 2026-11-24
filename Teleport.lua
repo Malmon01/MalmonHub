@@ -10,10 +10,12 @@ local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 0.9          -- หน่วงต่อรอบ (ปรับเพิ่ม/ลดได้ตามความเหมาะ)
-local MAX_SCAN_DISTANCE = 55  -- ระยะค้นหา Orb ใกล้ตัว (เพิ่มจากเดิมเพื่อให้ถึงเม็ดบนพื้น)
-local MIN_TP_DISTANCE = 2     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
-local HEIGHT_OFFSET = 0.5     -- ลดความสูงลงให้แตะ Orb บนพื้นได้ง่ายขึ้น
+local TP_DELAY = 0.9            -- หน่วงต่อรอบ (ปรับเพิ่ม/ลดได้)
+local MAX_SCAN_DISTANCE = 250   -- ระยะค้นหา Orb กว้างขึ้นมากๆ (Studs)
+local MAX_STEP_DISTANCE = 45    -- ระยะขยับสูงสุดต่อ 1 ครั้ง (กันกระโดดข้ามโซนจนหลุด/ติดหิน)
+local MIN_TP_DISTANCE = 2.5     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
+local MAX_DROP_HEIGHT = 8       -- กันวาร์ปลงจุดที่ต่ำกว่าตัวละครเกินไป
+local HEIGHT_OFFSET = 0.6       -- ความสูงเหนือ Orb
 local AUTO_REBIRTH_ENABLED = true
 local REBIRTH_COOLDOWN = 2.0
 -- ==========================================
@@ -160,7 +162,7 @@ local function tryAutoRebirth()
 	end
 end
 
--- เดินไปข้างหน้าแบบไม่ฝืนไถลทะลุหิน (ใช้ Humanoid เท่านั้น)
+-- เดินหน้าต่อเนื่องเฉพาะตอนกดเปิด (หยุดทันทีเมื่อกดปิด)
 RunService.Heartbeat:Connect(function()
 	if not isEnabled then return end
 	local humanoid, root = getCharParts()
@@ -193,8 +195,9 @@ local function findNearestOrbPos(currentPos)
 	for _, child in ipairs(orbsFolder:GetChildren()) do
 		local orbPos = getOrbPosition(child)
 		if orbPos then
+			local isTooLow = orbPos.Y < (currentPos.Y - MAX_DROP_HEIGHT)
 			local dist = (orbPos - currentPos).Magnitude
-			if dist >= MIN_TP_DISTANCE and dist <= bestDist then
+			if not isTooLow and dist >= MIN_TP_DISTANCE and dist <= bestDist then
 				bestDist = dist
 				bestPos = orbPos
 			end
@@ -217,12 +220,19 @@ local function waitInterruptible(seconds, token)
 	return isEnabled and (token == runToken)
 end
 
-local function teleportToOrb(orbPos)
+local function stepTowardOrb(orbPos)
 	local _, root = getCharParts()
 	if not root or not root:IsA("BasePart") then return end
 
 	currentGoalPos = orbPos
-	local tpPos = orbPos + Vector3.new(0, HEIGHT_OFFSET, 0)
+	local delta = orbPos - root.Position
+	local dist = delta.Magnitude
+	if dist <= 0.01 then return end
+
+	-- ขยับเข้าหาไม่เกิน MAX_STEP_DISTANCE ต่อครั้ง แม้ระยะสแกนจะกว้าง 250 ก็ตาม
+	local moveDist = math.min(MAX_STEP_DISTANCE, dist)
+	local stepPos = root.Position + (delta.Unit * moveDist)
+	local tpPos = stepPos + Vector3.new(0, HEIGHT_OFFSET, 0)
 	local lookTarget = Vector3.new(orbPos.X, tpPos.Y, orbPos.Z)
 	local lookCFrame = (lookTarget - tpPos).Magnitude > 0.01
 		and CFrame.lookAt(tpPos, lookTarget)
@@ -251,7 +261,7 @@ task.spawn(function()
 			if root and root:IsA("BasePart") then
 				local targetPos = findNearestOrbPos(root.Position)
 				if targetPos then
-					teleportToOrb(targetPos)
+					stepTowardOrb(targetPos)
 				end
 			end
 
