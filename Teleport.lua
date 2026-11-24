@@ -5,14 +5,14 @@ local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local playerGui = player:WaitForChild("PlayerGui")
 local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
--- ================= ตั้งค่าความเร็วและระยะ =================
+-- ================= ตั้งค่าความช้าและระยะ =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 0.8          -- หน่วงเวลา (วินาที) ต่อการไปหา Orb แต่ละเม็ด (เพิ่มเลขนี้ถ้ายังเร็วไป)
-local MAX_TP_DISTANCE = 90    -- ระยะไกลสุดที่จะไปหา (Studs) กันวาร์ปไกลข้ามโซน
+local TP_DELAY = 1.5          -- หน่วงเวลา (วินาที) ต่อการขยับ 1 ครั้ง (ยิ่งมากยิ่งช้า)
+local MAX_STEP_DISTANCE = 12  -- ระยะขยับสูงสุดต่อ 1 ก้าว (Studs) ยิ่งน้อยยิ่งช้า
+local MAX_SCAN_DISTANCE = 80  -- ระยะสแกนหา Orb ใกล้ตัว (Studs)
 local MIN_TP_DISTANCE = 4     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
-local HEIGHT_OFFSET = 2.5     -- ความสูงเหนือตำแหน่ง Orb
-local SMOOTH_MOVE = true      -- true = ขยับเข้าหาแบบนุ่มนวล, false = วาร์ปตรงทันที
--- ========================================================
+local HEIGHT_OFFSET = 2.5     -- ความสูงเหนือ Orb
+-- ======================================================
 
 local isEnabled = (DEFAULT_ENABLED == true)
 
@@ -82,20 +82,37 @@ local function getOrbPosition(obj)
 	end
 end
 
-local function moveToOrb(pos)
-	local char = player.Character
-	local root = getCharacterRoot()
-	if not char or not root or not root:IsA("BasePart") then return end
+local function findNearestOrbPos(currentPos)
+	local bestPos = nil
+	local bestDist = MAX_SCAN_DISTANCE
 
-	local targetPos = pos + Vector3.new(0, HEIGHT_OFFSET, 0)
-	local finalPos = targetPos
-
-	if SMOOTH_MOVE then
-		-- ดึงเข้าหา 65% ของระยะต่อรอบ เพื่อไม่ให้กระโดดแรงจนหลุดพื้นที่
-		finalPos = root.Position:Lerp(targetPos, 0.65)
+	for _, child in ipairs(orbsFolder:GetChildren()) do
+		local orbPos = getOrbPosition(child)
+		if orbPos then
+			local dist = (orbPos - currentPos).Magnitude
+			if dist >= MIN_TP_DISTANCE and dist <= bestDist then
+				bestDist = dist
+				bestPos = orbPos
+			end
+		end
 	end
 
-	local targetCFrame = CFrame.new(finalPos)
+	return bestPos
+end
+
+local function stepToward(root, targetPos)
+	local char = player.Character
+	if not char or not root or not root:IsA("BasePart") then return end
+
+	local goal = targetPos + Vector3.new(0, HEIGHT_OFFSET, 0)
+	local delta = goal - root.Position
+	local dist = delta.Magnitude
+	if dist <= 0.01 then return end
+
+	local moveDist = math.min(MAX_STEP_DISTANCE, dist)
+	local nextPos = root.Position + (delta.Unit * moveDist)
+	local targetCFrame = CFrame.new(nextPos)
+
 	pcall(function()
 		if char:FindFirstChild("HumanoidRootPart") then
 			char.HumanoidRootPart.AssemblyLinearVelocity = Vector3.zero
@@ -111,24 +128,18 @@ task.spawn(function()
 		if isEnabled then
 			local root = getCharacterRoot()
 			if root and root:IsA("BasePart") then
-				local currentPos = root.Position
-				local children = orbsFolder:GetChildren()
-
-				for _, child in ipairs(children) do
-					if not isEnabled then break end
-
-					local orbPos = getOrbPosition(child)
-					if orbPos then
-						local dist = (orbPos - currentPos).Magnitude
-						if dist >= MIN_TP_DISTANCE and dist <= MAX_TP_DISTANCE then
-							moveToOrb(orbPos)
-							currentPos = orbPos
-							task.wait(TP_DELAY)
-						end
-					end
+				local targetPos = findNearestOrbPos(root.Position)
+				if targetPos then
+					stepToward(root, targetPos)
+					task.wait(TP_DELAY)
+				else
+					task.wait(0.4)
 				end
+			else
+				task.wait(0.4)
 			end
+		else
+			task.wait(0.2)
 		end
-		task.wait(0.2)
 	end
 end)
