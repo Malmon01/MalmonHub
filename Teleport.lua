@@ -8,8 +8,8 @@ local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 1            -- หน่วงเวลา 1 วินาทีต่อรอบ
-local MAX_SCAN_DISTANCE = 100 -- ระยะค้นหา Orb (Studs)
+local TP_DELAY = 0.2          -- ความเร็วรอบการวาร์ป (ยิ่งน้อยยิ่งวาร์ปไว 0.15 - 0.3 กำลังดี)
+local WALK_SPEED_BOOST = 28   -- ความเร็วในการจำลองการเดินหน้าต่อเนื่อง
 local HEIGHT_OFFSET = 2.5     -- ความสูงตอนวาร์ปเหนือ Orb
 -- ==========================================
 
@@ -55,8 +55,7 @@ local function getCharParts()
 	return humanoid, root
 end
 
--- หยุดเดินทันทีเมื่อปิด
-local function stopForwardWalk()
+local function stopAllMovement()
 	local humanoid, root = getCharParts()
 	pcall(function()
 		if humanoid then
@@ -64,6 +63,9 @@ local function stopForwardWalk()
 			if root and root:IsA("BasePart") then
 				humanoid:MoveTo(root.Position)
 			end
+		end
+		if root and root:IsA("BasePart") then
+			root.AssemblyLinearVelocity = Vector3.zero
 		end
 	end)
 end
@@ -78,7 +80,7 @@ local function setState(state)
 	else
 		btn.Text = "TP ORB: OFF"
 		btn.BackgroundColor3 = Color3.fromRGB(192, 57, 43)
-		stopForwardWalk()
+		stopAllMovement()
 	end
 end
 
@@ -88,15 +90,26 @@ btn.MouseButton1Click:Connect(function()
 	setState(not isEnabled)
 end)
 
--- จำลองการกด W ค้างไว้ (เดินหน้าตลอดเวลาที่เปิดอยู่)
-RunService.RenderStepped:Connect(function()
+-- เดินหน้าต่อเนื่องตลอดเวลาที่กดเปิด (กันสคริปต์เกมตัดจังหวะให้เดินๆ หยุดๆ)
+RunService.Heartbeat:Connect(function(dt)
 	if not isEnabled then return end
-	local humanoid = getCharParts()
-	if humanoid then
-		pcall(function()
+	if type(dt) ~= "number" or dt <= 0 then return end
+
+	local humanoid, root = getCharParts()
+	if not root or not root:IsA("BasePart") then return end
+
+	pcall(function()
+		if humanoid then
 			humanoid:Move(Vector3.new(0, 0, -1), true)
-		end)
-	end
+		end
+
+		local forward = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+		if forward.Magnitude > 0.001 then
+			forward = forward.Unit
+			local step = forward * (WALK_SPEED_BOOST * dt)
+			root.CFrame = root.CFrame + step
+		end
+	end)
 end)
 
 local function getOrbPosition(obj)
@@ -111,41 +124,9 @@ local function getOrbPosition(obj)
 	end
 end
 
-local function findNearestOrbPos(currentPos)
-	local bestPos = nil
-	local bestDist = MAX_SCAN_DISTANCE
-
-	for _, child in ipairs(orbsFolder:GetChildren()) do
-		local orbPos = getOrbPosition(child)
-		if orbPos then
-			local dist = (orbPos - currentPos).Magnitude
-			if dist <= bestDist then
-				bestDist = dist
-				bestPos = orbPos
-			end
-		end
-	end
-
-	return bestPos
-end
-
-local function waitInterruptible(seconds, token)
-	local elapsed = 0
-	while elapsed < seconds do
-		if not isEnabled or token ~= runToken then
-			return false
-		end
-		local step = math.min(0.1, seconds - elapsed)
-		task.wait(step)
-		elapsed += step
-	end
-	return isEnabled and (token == runToken)
-end
-
-local function teleportToOrb(orbPos, token)
+local function teleportToOrb(orbPos)
 	local _, root = getCharParts()
 	if not root or not root:IsA("BasePart") then return end
-	if not isEnabled or token ~= runToken then return end
 
 	local tpPos = orbPos + Vector3.new(0, HEIGHT_OFFSET, 0)
 	local lookTarget = Vector3.new(orbPos.X, tpPos.Y, orbPos.Z)
@@ -159,23 +140,35 @@ local function teleportToOrb(orbPos, token)
 	end)
 end
 
+-- ลูปวาร์ปไปหา Orb ใน ClientOrbs แบบต่อเนื่องไม่ติดระยะสแกนแคบ
 task.spawn(function()
 	while true do
 		if isEnabled then
 			local token = runToken
-			local _, root = getCharParts()
-			if root and root:IsA("BasePart") then
-				local targetPos = findNearestOrbPos(root.Position)
-				if targetPos then
-					teleportToOrb(targetPos, token)
+			local children = orbsFolder:GetChildren()
+
+			for _, child in ipairs(children) do
+				if not isEnabled or token ~= runToken then
+					break
+				end
+
+				local orbPos = getOrbPosition(child)
+				if orbPos then
+					teleportToOrb(orbPos)
+					local waited = 0
+					while waited < TP_DELAY do
+						if not isEnabled or token ~= runToken then
+							break
+						end
+						task.wait(0.05)
+						waited += 0.05
+					end
 				end
 			end
 
-			if not waitInterruptible(TP_DELAY, token) then
-				stopForwardWalk()
-			end
+			task.wait(0.05)
 		else
-			stopForwardWalk()
+			stopAllMovement()
 			task.wait(0.2)
 		end
 	end
