@@ -10,9 +10,9 @@ local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 1.1            -- หน่วงต่อการวาร์ป 1 ลูก (ให้แต้มขึ้นทัน)
-local MAX_SCAN_DISTANCE = 220   -- ระยะค้นหา Orb (Studs)
-local MIN_TP_DISTANCE = 2.5     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
+local TP_DELAY = 1.1            -- หน่วงต่อการวาร์ป 1 ลูก (ปรับเพิ่ม/ลดได้)
+local MAX_SCAN_DISTANCE = 600   -- ระยะค้นหากว้างขึ้น เพื่อหาลูกที่ให้ EXP สูงสุด
+local MIN_TP_DISTANCE = 1.5     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
 local HEIGHT_OFFSET = 0.5       -- ระดับความสูงเหนือ Orb
 local AUTO_REBIRTH_ENABLED = true
 local REBIRTH_COOLDOWN = 2.0
@@ -182,6 +182,38 @@ local function getOrbPosition(obj)
 	end
 end
 
+-- แปลงข้อความตัวเลขย่อเช่น "5.5M", "250K", "1.2B" เป็นตัวเลขจริง
+local function parseAbbreviatedNumber(raw)
+	if type(raw) == "number" then return raw end
+	if type(raw) ~= "string" then return nil end
+	local cleaned = string.gsub(raw, ",", "")
+	local numPart, suffix = string.match(cleaned, "^%s*([%d%.]+)%s*([KkMmBbTt]?)%s*$")
+	if not numPart then return nil end
+	local n = tonumber(numPart)
+	if not n then return nil end
+	local mult = 1
+	local s = string.upper(suffix or "")
+	if s == "K" then mult = 1e3
+	elseif s == "M" then mult = 1e6
+	elseif s == "B" then mult = 1e9
+	elseif s == "T" then mult = 1e12
+	end
+	return n * mult
+end
+
+local function isExpKeyword(nameStr)
+	local lower = string.lower(nameStr or "")
+	return string.find(lower, "exp", 1, true)
+		or string.find(lower, "xp", 1, true)
+		or string.find(lower, "val", 1, true)
+		or string.find(lower, "amt", 1, true)
+		or string.find(lower, "amount", 1, true)
+		or string.find(lower, "power", 1, true)
+		or string.find(lower, "reward", 1, true)
+		or string.find(lower, "size", 1, true)
+		or string.find(lower, "tier", 1, true)
+end
+
 -- ประเมินค่า EXP / มูลค่าของ Orb แต่ละลูก เพื่อเลือกตัวที่ให้เยอะที่สุด
 local function getOrbExpScore(obj)
 	if not obj or not obj.Parent then return -math.huge end
@@ -189,39 +221,32 @@ local function getOrbExpScore(obj)
 	local bestScore = 0
 	local foundExplicitValue = false
 
-	-- 1. เช็ก Attributes ที่เกี่ยวกับ EXP / คะแนน / มูลค่า
-	for attrName, attrVal in pairs(obj:GetAttributes()) do
-		if type(attrVal) == "number" then
-			local lower = string.lower(attrName)
-			if string.find(lower, "exp", 1, true)
-				or string.find(lower, "xp", 1, true)
-				or string.find(lower, "val", 1, true)
-				or string.find(lower, "amt", 1, true)
-				or string.find(lower, "amount", 1, true)
-				or string.find(lower, "power", 1, true)
-				or string.find(lower, "reward", 1, true) then
-				foundExplicitValue = true
-				if attrVal > bestScore then
-					bestScore = attrVal
+	-- 1. เช็ก Attributes บนตัว Orb และลูกหลาน
+	local function scanAttributes(inst)
+		for attrName, attrVal in pairs(inst:GetAttributes()) do
+			if isExpKeyword(attrName) then
+				local parsed = parseAbbreviatedNumber(attrVal)
+				if parsed and parsed > 0 then
+					foundExplicitValue = true
+					if parsed > bestScore then
+						bestScore = parsed
+					end
 				end
 			end
 		end
 	end
 
-	-- 2. เช็ก ValueObject ข้างใน (NumberValue / IntValue)
+	scanAttributes(obj)
 	for _, desc in ipairs(obj:GetDescendants()) do
-		if desc:IsA("NumberValue") or desc:IsA("IntValue") then
-			local lower = string.lower(desc.Name)
-			if string.find(lower, "exp", 1, true)
-				or string.find(lower, "xp", 1, true)
-				or string.find(lower, "val", 1, true)
-				or string.find(lower, "amt", 1, true)
-				or string.find(lower, "amount", 1, true)
-				or string.find(lower, "power", 1, true)
-				or string.find(lower, "reward", 1, true) then
-				foundExplicitValue = true
-				if desc.Value > bestScore then
-					bestScore = desc.Value
+		scanAttributes(desc)
+		if desc:IsA("NumberValue") or desc:IsA("IntValue") or desc:IsA("StringValue") then
+			if isExpKeyword(desc.Name) then
+				local parsed = parseAbbreviatedNumber(desc.Value)
+				if parsed and parsed > 0 then
+					foundExplicitValue = true
+					if parsed > bestScore then
+						bestScore = parsed
+					end
 				end
 			end
 		end
@@ -231,25 +256,46 @@ local function getOrbExpScore(obj)
 		return bestScore
 	end
 
-	-- 3. ถ้าเกมไม่ได้เก็บตัวเลข EXP ไว้ตรงๆ ให้ใช้ขนาด/ปริมาตรของ Orb เป็นตัวประเมิน (ลูกใหญ่/มูลค่าสูงกว่ามักให้ EXP เยอะกว่า)
+	-- 2. ถ้าไม่พบค่าตัวเลข EXP โดยตรง ให้คำนวณจากขนาด/สเกล (ลูกใหญ่และสเกลสูงมักให้ EXP เยอะกว่า)
+	local scaleMult = 1
+	if obj:IsA("Model") then
+		pcall(function()
+			scaleMult = obj:GetScale()
+		end)
+	end
+
+	local meshScaleVol = 0
+	for _, desc in ipairs(obj:GetDescendants()) do
+		if desc:IsA("SpecialMesh") then
+			local sc = desc.Scale
+			local v = sc.X * sc.Y * sc.Z
+			if v > meshScaleVol then
+				meshScaleVol = v
+			end
+		end
+	end
+
 	if obj:IsA("BasePart") then
 		local s = obj.Size
-		return s.X * s.Y * s.Z
+		local vol = s.X * s.Y * s.Z
+		return math.max(vol, meshScaleVol) * scaleMult
 	elseif obj:IsA("Model") then
 		local _, size = obj:GetBoundingBox()
-		return size.X * size.Y * size.Z
+		local vol = size.X * size.Y * size.Z
+		return math.max(vol, meshScaleVol) * scaleMult
 	else
 		local part = obj:FindFirstChildWhichIsA("BasePart", true)
 		if part then
 			local s = part.Size
-			return s.X * s.Y * s.Z
+			local vol = s.X * s.Y * s.Z
+			return math.max(vol, meshScaleVol) * scaleMult
 		end
 	end
 
-	return 1
+	return math.max(1, meshScaleVol) * scaleMult
 end
 
--- เลือกลูกที่ให้ EXP สูงสุดในระยะ MAX_SCAN_DISTANCE (ถ้า EXP เท่ากันจะเลือกตัวที่ใกล้กว่า)
+-- เลือกลูกที่ให้ EXP / มูลค่าสูงสุดในระยะ MAX_SCAN_DISTANCE
 local function findHighestExpOrbPos(currentPos)
 	local bestPos = nil
 	local bestScore = -math.huge
