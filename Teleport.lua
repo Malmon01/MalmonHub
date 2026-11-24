@@ -9,7 +9,7 @@ local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 0.5            -- หน่วงเวลาต่อการวาร์ป 1 ครั้ง (แนะนำ 1.5 - 2.2 เพื่อไม่ให้เร็วไปจนโดนเตะ)
+local TP_DELAY = 1.2            -- หน่วงเวลาต่อการวาร์ป 1 ครั้ง (แนะนำ 1.5 - 2.2 เพื่อไม่ให้เร็วไปจนโดนเตะ)
 local MAX_SCAN_DISTANCE = 220   -- ระยะค้นหา Orb (Studs)
 local MIN_TP_DISTANCE = 2.5     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
 local HEIGHT_OFFSET = 0.6       -- ความสูงเหนือ Orb
