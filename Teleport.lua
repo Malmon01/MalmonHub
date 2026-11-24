@@ -9,10 +9,12 @@ local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 1.6            -- หน่วงเวลาต่อการวาร์ป 1 ครั้ง (แนะนำ 1.5 - 2.2 เพื่อไม่ให้เร็วไปจนโดนเตะ)
+local TP_DELAY = 1.6            -- เวลาขั้นต่ำระหว่างการวาร์ปไป Orb ใหม่ (1.5 - 2.2)
 local MAX_SCAN_DISTANCE = 220   -- ระยะค้นหา Orb (Studs)
-local MIN_TP_DISTANCE = 2.5     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
-local HEIGHT_OFFSET = 0.6       -- ความสูงเหนือ Orb
+local HEIGHT_OFFSET = 0.0       -- ความสูงเหนือ Orb (0 = ทับตรงกลางเลย เก็บติดง่ายกว่า)
+local MAX_ATTEMPTS = 2          -- วาร์ปไป Orb เดิมได้กี่รอบ ถ้ายังไม่หายถือว่าเก็บไม่ได้
+local BLACKLIST_TIME = 20       -- ข้าม Orb ที่เก็บไม่ได้เป็นเวลากี่วินาที
+local NUDGE_RADIUS = 1.5        -- ขยับรอบ Orb เล็กน้อยเพื่อให้ Touch ทำงาน
 local AUTO_REBIRTH_ENABLED = true
 local REBIRTH_COOLDOWN = 2.0
 -- ==========================================
@@ -20,6 +22,11 @@ local REBIRTH_COOLDOWN = 2.0
 local isEnabled = (DEFAULT_ENABLED == true)
 local runToken = 0
 local lastRebirthTime = 0
+
+-- เก็บสถานะของแต่ละ Orb (weak key = Orb ถูกลบแล้วข้อมูลหายเอง)
+local orbAttempts = setmetatable({}, { __mode = "k" })
+local orbBlacklistUntil = setmetatable({}, { __mode = "k" })
+local orbScoreCache = setmetatable({}, { __mode = "k" })
 
 local oldGui = playerGui:FindFirstChild("OrbTpGui")
 if oldGui then
@@ -53,6 +60,8 @@ stroke.Thickness = 2
 local function getCharRoot()
 	local char = player.Character
 	if not char then return nil end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if hum and hum.Health <= 0 then return nil end
 	return char:FindFirstChild("HumanoidRootPart")
 		or char.PrimaryPart
 		or char:FindFirstChildWhichIsA("BasePart", true)
@@ -81,6 +90,9 @@ local function isGuiReallyVisible(guiObj)
 	local current = guiObj
 	while current and current ~= playerGui do
 		if current:IsA("GuiObject") and not current.Visible then
+			return false
+		end
+		if current:IsA("ScreenGui") and not current.Enabled then
 			return false
 		end
 		current = current.Parent
@@ -139,16 +151,24 @@ local function tryAutoRebirth()
 	end
 end
 
+local function getOrbPart(obj)
+	if not obj or not obj.Parent then return nil end
+	if obj:IsA("BasePart") then return obj end
+	if obj:IsA("Model") and obj.PrimaryPart then return obj.PrimaryPart end
+	return obj:FindFirstChildWhichIsA("BasePart", true)
+end
+
 local function getOrbPosition(obj)
 	if not obj or not obj.Parent then return nil end
-	if obj:IsA("BasePart") then
-		return obj.Position
-	elseif obj:IsA("Model") then
+	if obj:IsA("Model") then
 		return obj:GetPivot().Position
-	else
-		local part = obj:FindFirstChildWhichIsA("BasePart", true)
-		return part and part.Position or nil
 	end
+	local part = getOrbPart(obj)
+	return part and part.Position or nil
+end
+
+local function isOrbAlive(obj)
+	return obj ~= nil and obj.Parent ~= nil and obj:IsDescendantOf(orbsFolder)
 end
 
 local function parseAbbreviatedNumber(raw)
@@ -182,92 +202,142 @@ local function isExpKeyword(nameStr)
 		or string.find(lower, "tier", 1, true)
 end
 
-local function getOrbExpScore(obj)
-	if not obj or not obj.Parent then return -math.huge end
-
+local function computeOrbExpScore(obj)
 	local bestScore = 0
 	local foundExplicitValue = false
 
+	local function consider(v)
+		local parsed = parseAbbreviatedNumber(v)
+		if parsed and parsed > 0 then
+			foundExplicitValue = true
+			if parsed > bestScore then bestScore = parsed end
+		end
+	end
+
 	local function scanAttributes(inst)
 		for attrName, attrVal in pairs(inst:GetAttributes()) do
-			if isExpKeyword(attrName) then
-				local parsed = parseAbbreviatedNumber(attrVal)
-				if parsed and parsed > 0 then
-					foundExplicitValue = true
-					if parsed > bestScore then
-						bestScore = parsed
-					end
-				end
-			end
+			if isExpKeyword(attrName) then consider(attrVal) end
 		end
 	end
 
 	scanAttributes(obj)
 	for _, desc in ipairs(obj:GetDescendants()) do
 		scanAttributes(desc)
-		if desc:IsA("NumberValue") or desc:IsA("IntValue") or desc:IsA("StringValue") then
-			if isExpKeyword(desc.Name) then
-				local parsed = parseAbbreviatedNumber(desc.Value)
-				if parsed and parsed > 0 then
-					foundExplicitValue = true
-					if parsed > bestScore then
-						bestScore = parsed
+		if (desc:IsA("NumberValue") or desc:IsA("IntValue") or desc:IsA("StringValue"))
+			and isExpKeyword(desc.Name) then
+			consider(desc.Value)
+		end
+	end
+
+	if foundExplicitValue then return bestScore end
+
+	if obj:IsA("Model") then
+		local _, size = obj:GetBoundingBox()
+		return size.X * size.Y * size.Z
+	end
+	local part = getOrbPart(obj)
+	if part then
+		local s = part.Size
+		return s.X * s.Y * s.Z
+	end
+	return 1
+end
+
+-- คำนวณคะแนนครั้งเดียวต่อ Orb (ลดอาการกระตุก)
+local function getOrbExpScore(obj)
+	local cached = orbScoreCache[obj]
+	if cached then return cached end
+	local ok, score = pcall(computeOrbExpScore, obj)
+	score = ok and score or 1
+	orbScoreCache[obj] = score
+	return score
+end
+
+local function isBlacklisted(obj)
+	local untilT = orbBlacklistUntil[obj]
+	if untilT and os.clock() < untilT then return true end
+	if untilT then
+		orbBlacklistUntil[obj] = nil
+		orbAttempts[obj] = nil
+	end
+	return false
+end
+
+local function findBestOrb(currentPos)
+	local bestOrb, bestPos = nil, nil
+	local bestScore = -math.huge
+	local bestTieDist = math.huge
+
+	for _, child in ipairs(orbsFolder:GetChildren()) do
+		if not isBlacklisted(child) then
+			local orbPos = getOrbPosition(child)
+			if orbPos then
+				local dist = (orbPos - currentPos).Magnitude
+				if dist <= MAX_SCAN_DISTANCE then
+					local score = getOrbExpScore(child)
+					if (score > bestScore) or (math.abs(score - bestScore) <= 1e-6 and dist < bestTieDist) then
+						bestScore = score
+						bestTieDist = dist
+						bestOrb = child
+						bestPos = orbPos
 					end
 				end
 			end
 		end
 	end
 
-	if foundExplicitValue then
-		return bestScore
-	end
-
-	if obj:IsA("BasePart") then
-		local s = obj.Size
-		return s.X * s.Y * s.Z
-	elseif obj:IsA("Model") then
-		local _, size = obj:GetBoundingBox()
-		return size.X * size.Y * size.Z
-	else
-		local part = obj:FindFirstChildWhichIsA("BasePart", true)
-		if part then
-			local s = part.Size
-			return s.X * s.Y * s.Z
-		end
-	end
-
-	return 1
+	return bestOrb, bestPos
 end
 
-local function findBestOrbPos(currentPos)
-	local bestPos = nil
-	local bestScore = -math.huge
-	local bestTieDist = math.huge
+local function setRootCFrame(root, pos)
+	pcall(function()
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		root.CFrame = CFrame.new(pos) * (root.CFrame - root.CFrame.Position)
+	end)
+end
 
-	for _, child in ipairs(orbsFolder:GetChildren()) do
-		local orbPos = getOrbPosition(child)
-		if orbPos then
-			local dist = (orbPos - currentPos).Magnitude
-			if dist >= MIN_TP_DISTANCE and dist <= MAX_SCAN_DISTANCE then
-				local score = getOrbExpScore(child)
-				if (score > bestScore) or (math.abs(score - bestScore) <= 1e-6 and dist < bestTieDist) then
-					bestScore = score
-					bestTieDist = dist
-					bestPos = orbPos
-				end
-			end
-		end
+-- พยายามให้เกิด Touch กับ Orb (บาง executor มี firetouchinterest)
+local function tryTouch(root, orb)
+	local part = getOrbPart(orb)
+	if not part then return end
+	local fti = (typeof(firetouchinterest) == "function") and firetouchinterest or nil
+	if fti then
+		pcall(function()
+			fti(root, part, 0)
+			task.wait()
+			fti(root, part, 1)
+		end)
 	end
+end
 
-	return bestPos
+-- รอจน Orb หาย หรือหมดเวลา (ขยับรอบ ๆ Orb ระหว่างรอ)
+local function waitForCollect(root, orb, seconds, token)
+	local start = os.clock()
+	local step = 0
+	while os.clock() - start < seconds do
+		if not isEnabled or token ~= runToken then return false end
+		if not isOrbAlive(orb) then return true end
+		if not root.Parent then return false end
+
+		local orbPos = getOrbPosition(orb)
+		if orbPos then
+			step += 1
+			local angle = step * (math.pi / 2)
+			local offset = (step % 2 == 0) and Vector3.zero
+				or Vector3.new(math.cos(angle) * NUDGE_RADIUS, 0, math.sin(angle) * NUDGE_RADIUS)
+			setRootCFrame(root, orbPos + Vector3.new(0, HEIGHT_OFFSET, 0) + offset)
+			tryTouch(root, orb)
+		end
+		task.wait(0.15)
+	end
+	return not isOrbAlive(orb)
 end
 
 local function waitInterruptible(seconds, token)
 	local elapsed = 0
 	while elapsed < seconds do
-		if not isEnabled or token ~= runToken then
-			return false
-		end
+		if not isEnabled or token ~= runToken then return false end
 		local step = math.min(0.1, seconds - elapsed)
 		task.wait(step)
 		elapsed += step
@@ -275,26 +345,16 @@ local function waitInterruptible(seconds, token)
 	return isEnabled and (token == runToken)
 end
 
-local function teleportToOrb(orbPos)
-	local root = getCharRoot()
-	if not root or not root:IsA("BasePart") then return end
-
-	local tpPos = orbPos + Vector3.new(0, HEIGHT_OFFSET, 0)
-	local lookTarget = Vector3.new(orbPos.X, tpPos.Y, orbPos.Z)
-	local lookCFrame = (lookTarget - tpPos).Magnitude > 0.01
-		and CFrame.lookAt(tpPos, lookTarget)
-		or CFrame.new(tpPos)
-
-	pcall(function()
-		root.AssemblyLinearVelocity = Vector3.zero
-		root.CFrame = lookCFrame
-	end)
-end
+-- ล้างข้อมูลเมื่อเกิดใหม่
+player.CharacterAdded:Connect(function()
+	table.clear(orbAttempts)
+	table.clear(orbBlacklistUntil)
+end)
 
 task.spawn(function()
 	while true do
 		if isEnabled then
-			tryAutoRebirth()
+			pcall(tryAutoRebirth)
 		end
 		task.wait(0.5)
 	end
@@ -305,13 +365,40 @@ task.spawn(function()
 		if isEnabled then
 			local token = runToken
 			local root = getCharRoot()
-			if root and root:IsA("BasePart") then
-				local targetPos = findBestOrbPos(root.Position)
-				if targetPos then
-					teleportToOrb(targetPos)
+			local ok, err = pcall(function()
+				if not (root and root:IsA("BasePart")) then
+					task.wait(0.5)
+					return
 				end
+
+				local orb, orbPos = findBestOrb(root.Position)
+				if not orb then
+					waitInterruptible(0.5, token)
+					return
+				end
+
+				local tpStart = os.clock()
+				setRootCFrame(root, orbPos + Vector3.new(0, HEIGHT_OFFSET, 0))
+				local collected = waitForCollect(root, orb, TP_DELAY, token)
+				local remaining = TP_DELAY - (os.clock() - tpStart)
+
+				if not collected and isOrbAlive(orb) then
+					-- เก็บไม่ได้ → นับครั้ง ถ้าเกินกำหนดให้ข้ามไปชั่วคราว
+					orbAttempts[orb] = (orbAttempts[orb] or 0) + 1
+					if orbAttempts[orb] >= MAX_ATTEMPTS then
+						orbBlacklistUntil[orb] = os.clock() + BLACKLIST_TIME
+					end
+				else
+					-- เก็บได้แล้ว แต่ยังเคารพเวลาขั้นต่ำ ไม่ให้วาร์ปถี่เกิน
+					if remaining > 0 then
+						waitInterruptible(remaining, token)
+					end
+				end
+			end)
+			if not ok then
+				warn("[OrbTp] error:", err)
+				task.wait(0.5)
 			end
-			waitInterruptible(TP_DELAY, token)
 		else
 			task.wait(0.2)
 		end
