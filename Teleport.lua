@@ -3,22 +3,24 @@ local Workspace = game:GetService("Workspace")
 
 local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local playerGui = player:WaitForChild("PlayerGui")
-local orbsFolder = Workspace:WaitForChild("ClientOrbs") --[cite: 1]
+local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
--- ================= ตั้งค่า =================
-local DEFAULT_ENABLED = false -- เริ่มต้นปิดไว้ก่อน กดปุ่มค่อยเปิด
-local TP_DELAY = 0.25         -- หน่วงเวลา (วินาที) ก่อนวาร์ปไป Orb ถัดไป
--- ==========================================
+-- ================= ตั้งค่าความเร็วและระยะ =================
+local DEFAULT_ENABLED = false
+local TP_DELAY = 0.8          -- หน่วงเวลา (วินาที) ต่อการไปหา Orb แต่ละเม็ด (เพิ่มเลขนี้ถ้ายังเร็วไป)
+local MAX_TP_DISTANCE = 90    -- ระยะไกลสุดที่จะไปหา (Studs) กันวาร์ปไกลข้ามโซน
+local MIN_TP_DISTANCE = 4     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
+local HEIGHT_OFFSET = 2.5     -- ความสูงเหนือตำแหน่ง Orb
+local SMOOTH_MOVE = true      -- true = ขยับเข้าหาแบบนุ่มนวล, false = วาร์ปตรงทันที
+-- ========================================================
 
 local isEnabled = (DEFAULT_ENABLED == true)
 
--- ลบปุ่มเก่าถ้ามี
 local oldGui = playerGui:FindFirstChild("OrbTpGui")
 if oldGui then
 	oldGui:Destroy()
 end
 
--- สร้างปุ่มเปิด-ปิดด้านบนกลางจอ
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "OrbTpGui"
 screenGui.ResetOnSpawn = false
@@ -60,7 +62,14 @@ btn.MouseButton1Click:Connect(function()
 	updateBtn()
 end)
 
--- หาตำแหน่งของ Orb
+local function getCharacterRoot()
+	local char = player.Character
+	if not char then return nil end
+	return char:FindFirstChild("HumanoidRootPart")
+		or char.PrimaryPart
+		or char:FindFirstChildWhichIsA("BasePart", true)
+end
+
 local function getOrbPosition(obj)
 	if not obj or not obj.Parent then return nil end
 	if obj:IsA("BasePart") then
@@ -73,39 +82,53 @@ local function getOrbPosition(obj)
 	end
 end
 
--- Teleport ตัวละครไปยังตำแหน่งเป้าหมาย
-local function teleportTo(pos)
+local function moveToOrb(pos)
 	local char = player.Character
-	if not char then return end
+	local root = getCharacterRoot()
+	if not char or not root or not root:IsA("BasePart") then return end
 
-	local targetCFrame = CFrame.new(pos + Vector3.new(0, 2, 0))
-	local root = char:FindFirstChild("HumanoidRootPart")
+	local targetPos = pos + Vector3.new(0, HEIGHT_OFFSET, 0)
+	local finalPos = targetPos
 
-	if root and root:IsA("BasePart") then
-		root.CFrame = targetCFrame
-	elseif char.PrimaryPart then
-		char:PivotTo(targetCFrame)
-	else
-		pcall(function()
-			char:PivotTo(targetCFrame)
-		end)
+	if SMOOTH_MOVE then
+		-- ดึงเข้าหา 65% ของระยะต่อรอบ เพื่อไม่ให้กระโดดแรงจนหลุดพื้นที่
+		finalPos = root.Position:Lerp(targetPos, 0.65)
 	end
+
+	local targetCFrame = CFrame.new(finalPos)
+	pcall(function()
+		if char:FindFirstChild("HumanoidRootPart") then
+			char.HumanoidRootPart.AssemblyLinearVelocity = Vector3.zero
+			char.HumanoidRootPart.CFrame = targetCFrame
+		else
+			char:PivotTo(targetCFrame)
+		end
+	end)
 end
 
--- ลูป Teleport ไปหา Orb ใน ClientOrbs
 task.spawn(function()
 	while true do
 		if isEnabled then
-			local children = orbsFolder:GetChildren()
-			for _, child in ipairs(children) do
-				if not isEnabled then break end
-				local orbPos = getOrbPosition(child)
-				if orbPos then
-					teleportTo(orbPos)
-					task.wait(TP_DELAY)
+			local root = getCharacterRoot()
+			if root and root:IsA("BasePart") then
+				local currentPos = root.Position
+				local children = orbsFolder:GetChildren()
+
+				for _, child in ipairs(children) do
+					if not isEnabled then break end
+
+					local orbPos = getOrbPosition(child)
+					if orbPos then
+						local dist = (orbPos - currentPos).Magnitude
+						if dist >= MIN_TP_DISTANCE and dist <= MAX_TP_DISTANCE then
+							moveToOrb(orbPos)
+							currentPos = orbPos
+							task.wait(TP_DELAY)
+						end
+					end
 				end
 			end
 		end
-		task.wait(0.1)
+		task.wait(0.2)
 	end
 end)
