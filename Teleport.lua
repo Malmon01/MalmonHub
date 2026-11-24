@@ -9,10 +9,11 @@ local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 1.6            -- หน่วงเวลาต่อการวาร์ป 1 ครั้ง (แนะนำ 1.5 - 2.2 เพื่อไม่ให้เร็วไปจนโดนเตะ)
-local MAX_SCAN_DISTANCE = 220   -- ระยะค้นหา Orb (Studs)
-local MIN_TP_DISTANCE = 2.5     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
-local HEIGHT_OFFSET = 0.6       -- ความสูงเหนือ Orb
+local TP_DELAY = 1.35           -- หน่วงต่อรอบ (กันโดนเตะ + ให้แต้มขึ้นทัน)
+local MAX_SCAN_DISTANCE = 95    -- จำกัดระยะค้นหาเพื่อไม่ให้วาร์ปไปโซนที่เก็บไม่ทัน
+local MIN_TP_DISTANCE = 2.0     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
+local DISTANCE_PENALTY = 18     -- ตัวถ่วงระยะทาง (ยิ่งมาก ยิ่งเน้นเม็ดที่เข้าถึงและเก็บแต้มได้จริง)
+local HEIGHT_OFFSET = 0.5       -- ความสูงเหนือ Orb
 local AUTO_REBIRTH_ENABLED = true
 local REBIRTH_COOLDOWN = 2.0
 -- ==========================================
@@ -45,7 +46,7 @@ btn.BorderSizePixel = 0
 btn.ZIndex = 999
 btn.Parent = screenGui
 
-Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 10)
+Instance.new("UICner", btn).CornerRadius = UDim.new(0, 10)
 local stroke = Instance.new("UIStroke", btn)
 stroke.Color = Color3.fromRGB(15, 15, 15)
 stroke.Thickness = 2
@@ -183,7 +184,7 @@ local function isExpKeyword(nameStr)
 end
 
 local function getOrbExpScore(obj)
-	if not obj or not obj.Parent then return -math.huge end
+	if not obj or not obj.Parent then return 0 end
 
 	local bestScore = 0
 	local foundExplicitValue = false
@@ -239,20 +240,20 @@ local function getOrbExpScore(obj)
 	return 1
 end
 
+-- เลือก Orb ที่ให้ EXP สูงและเข้าถึงได้จริงในระยะใกล้พอดี ไม่วาร์ปข้ามไปจุดที่เก็บแต้มไม่ได้
 local function findBestOrbPos(currentPos)
 	local bestPos = nil
-	local bestScore = -math.huge
-	local bestTieDist = math.huge
+	local bestWeightedScore = -math.huge
 
 	for _, child in ipairs(orbsFolder:GetChildren()) do
 		local orbPos = getOrbPosition(child)
 		if orbPos then
 			local dist = (orbPos - currentPos).Magnitude
 			if dist >= MIN_TP_DISTANCE and dist <= MAX_SCAN_DISTANCE then
-				local score = getOrbExpScore(child)
-				if (score > bestScore) or (math.abs(score - bestScore) <= 1e-6 and dist < bestTieDist) then
-					bestScore = score
-					bestTieDist = dist
+				local rawScore = math.max(1, getOrbExpScore(child))
+				local weightedScore = rawScore / (1 + (dist / DISTANCE_PENALTY))
+				if weightedScore > bestWeightedScore then
+					bestWeightedScore = weightedScore
 					bestPos = orbPos
 				end
 			end
