@@ -3,125 +3,139 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local player = Players.LocalPlayer
+local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local playerGui = player:WaitForChild("PlayerGui")
 local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
--- ================= ตั้งค่า =================
+-- ================= ตั้งค่า (ห้ามปล่อยว่าง/nil) =================
 local DEFAULT_ENABLED = true
-local TOGGLE_KEY = Enum.KeyCode.E
-local MAGNET_RANGE = 40      -- เพิ่มระยะดูดให้กว้างขึ้น (ปรับได้)
-local COLLECT_RANGE = 5      -- ระยะเก็บ
-local MOVE_SPEED = 70        -- ความเร็วดูด
-local DEBUG_LOG = false      -- เปลี่ยนเป็น true หากอยากดู log ใน Output
--- ==========================================
+local TOGGLE_KEY = Enum.KeyCode.E -- ตั้งเป็น nil ได้เฉพาะตรงนี้ เพราะมีเช็ก if TOGGLE_KEY then
+local MAGNET_RANGE = 45
+local COLLECT_RANGE = 5
+local MOVE_SPEED = 75
+-- ============================================================
 
-local isEnabled = DEFAULT_ENABLED
+local isEnabled = (DEFAULT_ENABLED == true)
 
--- ลบ GUI เก่าถ้ามีอยู่แล้ว เพื่อไม่ให้ซ้อนกัน
-local oldGui = playerGui:FindFirstChild("OrbAutoCollectGui")
-if oldGui then oldGui:Destroy() end
+-- ล้าง GUI เดิมก่อนสร้างใหม่ ป้องกันปุ่มซ้อน
+local existingGui = playerGui:FindFirstChild("OrbMagnetLocalGui")
+if existingGui then
+	existingGui:Destroy()
+end
 
--- สร้างปุ่มบนจอให้อยู่ด้านบนกลาง และลอยทับ UI เกม
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "OrbAutoCollectGui"
+screenGui.Name = "OrbMagnetLocalGui"
 screenGui.ResetOnSpawn = false
-screenGui.DisplayOrder = 999
+screenGui.DisplayOrder = 9999
 screenGui.IgnoreGuiInset = true
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = playerGui
 
-local toggleButton = Instance.new("TextButton")
-toggleButton.Name = "ToggleOrbButton"
-toggleButton.Size = UDim2.new(0, 180, 0, 42)
-toggleButton.Position = UDim2.new(0.5, -90, 0, 14) -- ด้านบนกลางจอ ไม่โดนเมนูซ้ายบัง
-toggleButton.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
-toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-toggleButton.Font = Enum.Font.GothamBold
-toggleButton.TextSize = 15
-toggleButton.BorderSizePixel = 0
-toggleButton.ZIndex = 100
-toggleButton.Parent = screenGui
-
-local stroke = Instance.new("UIStroke")
-stroke.Color = Color3.fromRGB(20, 20, 20)
-stroke.Thickness = 2
-stroke.Parent = toggleButton
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Name = "ToggleBtn"
+toggleBtn.Size = UDim2.new(0, 176, 0, 40)
+toggleBtn.Position = UDim2.new(0.5, -88, 0, 16)
+toggleBtn.Font = Enum.Font.GothamBold
+toggleBtn.TextSize = 14
+toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleBtn.BorderSizePixel = 0
+toggleBtn.ZIndex = 999
+toggleBtn.Parent = screenGui
 
 local corner = Instance.new("UICorner")
 corner.CornerRadius = UDim.new(0, 10)
-corner.Parent = toggleButton
+corner.Parent = toggleBtn
 
-local function setEnabled(state)
-	isEnabled = state
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(15, 15, 15)
+stroke.Thickness = 2
+stroke.Parent = toggleBtn
+
+local function updateButton()
 	if isEnabled then
-		toggleButton.Text = "Orb Collect: ON"
-		toggleButton.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
+		toggleBtn.Text = "ORB MAGNET: ON"
+		toggleBtn.BackgroundColor3 = Color3.fromRGB(39, 174, 96)
 	else
-		toggleButton.Text = "Orb Collect: OFF"
-		toggleButton.BackgroundColor3 = Color3.fromRGB(231, 76, 60)
-	end
-	if DEBUG_LOG then
-		print("[OrbCollect] Status =", isEnabled, "| Orbs count =", #orbsFolder:GetChildren())
+		toggleBtn.Text = "ORB MAGNET: OFF"
+		toggleBtn.BackgroundColor3 = Color3.fromRGB(192, 57, 43)
 	end
 end
 
-setEnabled(isEnabled)
+updateButton()
 
-toggleButton.MouseButton1Click:Connect(function()
-	setEnabled(not isEnabled)
+toggleBtn.MouseButton1Click:Connect(function()
+	isEnabled = not isEnabled
+	updateButton()
 end)
 
 if TOGGLE_KEY then
 	UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if gameProcessed then return end
 		if input.KeyCode == TOGGLE_KEY then
-			setEnabled(not isEnabled)
+			isEnabled = not isEnabled
+			updateButton()
 		end
 	end)
 end
 
--- หาตำแหน่งตัวละครของผู้เล่น (รองรับทั้งมด/ตัวละครที่ไม่มี HumanoidRootPart)
-local function getTargetPosition()
-	local character = player.Character
-	if not character then return nil end
+local function getCharacterPos()
+	local char = player.Character
+	if not char then return nil end
 
-	local root = character:FindFirstChild("HumanoidRootPart")
-		or character.PrimaryPart
-		or character:FindFirstChildWhichIsA("BasePart", true)
+	local root = char:FindFirstChild("HumanoidRootPart")
+		or char.PrimaryPart
+		or char:FindFirstChildWhichIsA("BasePart", true)
 
-	return root and root.Position or nil
+	if root and root:IsA("BasePart") then
+		return root.Position
+	end
+	return nil
 end
 
--- ดึง Part หลักของ Orb (รองรับทั้ง BasePart และ Model)
-local function getOrbPart(item)
-	if item:IsA("BasePart") then
-		return item
-	elseif item:IsA("Model") then
-		return item.PrimaryPart or item:FindFirstChildWhichIsA("BasePart", true)
+local function getOrbBasePart(obj)
+	if not obj or not obj.Parent then return nil end
+	if obj:IsA("BasePart") then
+		return obj
+	elseif obj:IsA("Model") then
+		return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
 	end
 	return nil
 end
 
 RunService.Heartbeat:Connect(function(dt)
 	if not isEnabled then return end
+	if type(dt) ~= "number" or dt <= 0 then return end
 
-	local playerPos = getTargetPosition()
+	local playerPos = getCharacterPos()
 	if not playerPos then return end
 
-	for _, child in ipairs(orbsFolder:GetChildren()) do
-		local orbPart = getOrbPart(child)
-		if orbPart and orbPart.Parent then
-			local distance = (orbPart.Position - playerPos).Magnitude
+	local children = orbsFolder:GetChildren()
+	for i = 1, #children do
+		local child = children[i]
+		local part = getOrbBasePart(child)
 
-			if distance <= COLLECT_RANGE then
-				child:Destroy()
-			elseif distance <= MAGNET_RANGE then
-				if orbPart.Anchored then
-					orbPart.Anchored = false
-				end
-				local direction = (playerPos - orbPart.Position).Unit
-				orbPart.Position += direction * MOVE_SPEED * dt
+		if part and part.Parent then
+			local orbPos = child:IsA("Model") and child:GetPivot().Position or part.Position
+			local delta = playerPos - orbPos
+			local dist = delta.Magnitude
+
+			if dist <= COLLECT_RANGE then
+				pcall(function()
+					child:Destroy()
+				end)
+			elseif dist <= MAGNET_RANGE and dist > 0.001 then
+				pcall(function()
+					if part.Anchored then
+						part.Anchored = false
+					end
+					local step = math.min(MOVE_SPEED * dt, dist)
+					local nextPos = orbPos + (delta.Unit * step)
+					if child:IsA("Model") then
+						child:PivotTo(CFrame.new(nextPos))
+					else
+						part.CFrame = CFrame.new(nextPos)
+					end
+				end)
 			end
 		end
 	end
