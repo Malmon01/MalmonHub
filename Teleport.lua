@@ -10,8 +10,8 @@ local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 2.0          -- หน่วง 2 วินาทีต่อรอบ ให้แต้มขึ้นทัน
-local MAX_SCAN_DISTANCE = 25  -- เก็บเฉพาะเม็ดใกล้ตัวมาก (กันหลุดโซน/ตกน้ำ)
+local TP_DELAY = 1.0          -- หน่วง 2 วินาทีต่อรอบ ให้แต้มขึ้นทัน
+local MAX_SCAN_DISTANCE = 40 -- เก็บเฉพาะเม็ดใกล้ตัวมาก (กันหลุดโซน/ตกน้ำ)
 local MIN_TP_DISTANCE = 2.5   -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
 local MAX_DROP_HEIGHT = 6     -- กันวาร์ปลงจุดที่ต่ำกว่าตัวละครเกินไป (เช่น ผิวน้ำ/หลุม)
 local WALK_SPEED_BOOST = 9    -- ความเร็วเดินหน้าต่อเนื่องตอนเปิด (หยุดทันทีเมื่อปิด)
