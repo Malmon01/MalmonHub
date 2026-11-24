@@ -15,6 +15,8 @@ local HEIGHT_OFFSET = 0.0       -- ความสูงเหนือ Orb (0 =
 local MAX_ATTEMPTS = 2          -- วาร์ปไป Orb เดิมได้กี่รอบ ถ้ายังไม่หายถือว่าเก็บไม่ได้
 local BLACKLIST_TIME = 20       -- ข้าม Orb ที่เก็บไม่ได้เป็นเวลากี่วินาที
 local NUDGE_RADIUS = 1.5        -- ขยับรอบ Orb เล็กน้อยเพื่อให้ Touch ทำงาน
+local MAX_GROUND_GAP = 15       -- Orb ต้องมีพื้นอยู่ใต้ไม่เกินกี่ studs (กันวาร์ปขึ้นฟ้า)
+local ORB_MOVED_DIST = 4        -- Orb ขยับออกจากจุดเดิมเกินนี้ = ถูกเก็บแล้ว (กำลังเล่นแอนิเมชันลอยขึ้น)
 local AUTO_REBIRTH_ENABLED = true
 local REBIRTH_COOLDOWN = 2.0
 -- ==========================================
@@ -263,6 +265,26 @@ local function isBlacklisted(obj)
 	return false
 end
 
+-- เช็คว่ามีพื้นอยู่ใต้ Orb (Orb ที่ลอยกลางฟ้า/กำลังบินขึ้นหลังเก็บ จะถูกข้าม)
+local groundParams = RaycastParams.new()
+groundParams.FilterType = Enum.RaycastFilterType.Exclude
+groundParams.IgnoreWater = false
+
+local function hasGroundBelow(pos)
+	local ignore = { orbsFolder }
+	if player.Character then table.insert(ignore, player.Character) end
+	groundParams.FilterDescendantsInstances = ignore
+	local hit = Workspace:Raycast(pos + Vector3.new(0, 1, 0), Vector3.new(0, -(MAX_GROUND_GAP + 1), 0), groundParams)
+	return hit ~= nil
+end
+
+local function isOrbVisible(obj)
+	local part = getOrbPart(obj)
+	if not part then return false end
+	return part.Transparency < 0.95 or part:FindFirstChildWhichIsA("ParticleEmitter", true) ~= nil
+		or part:FindFirstChildWhichIsA("BillboardGui", true) ~= nil
+end
+
 local function findBestOrb(currentPos)
 	local bestOrb, bestPos = nil, nil
 	local bestScore = -math.huge
@@ -273,7 +295,7 @@ local function findBestOrb(currentPos)
 			local orbPos = getOrbPosition(child)
 			if orbPos then
 				local dist = (orbPos - currentPos).Magnitude
-				if dist <= MAX_SCAN_DISTANCE then
+				if dist <= MAX_SCAN_DISTANCE and isOrbVisible(child) and hasGroundBelow(orbPos) then
 					local score = getOrbExpScore(child)
 					if (score > bestScore) or (math.abs(score - bestScore) <= 1e-6 and dist < bestTieDist) then
 						bestScore = score
@@ -312,7 +334,9 @@ local function tryTouch(root, orb)
 end
 
 -- รอจน Orb หาย หรือหมดเวลา (ขยับรอบ ๆ Orb ระหว่างรอ)
-local function waitForCollect(root, orb, seconds, token)
+-- ใช้ตำแหน่งเริ่มต้นของ Orb เป็นจุดยึด ไม่วิ่งตาม Orb
+-- (เดิมวิ่งตาม Orb ที่กำลังลอยขึ้นหลังเก็บ ทำให้ตัวละครถูกลากขึ้นฟ้า)
+local function waitForCollect(root, orb, anchorPos, seconds, token)
 	local start = os.clock()
 	local step = 0
 	while os.clock() - start < seconds do
@@ -321,17 +345,20 @@ local function waitForCollect(root, orb, seconds, token)
 		if not root.Parent then return false end
 
 		local orbPos = getOrbPosition(orb)
-		if orbPos then
-			step += 1
-			local angle = step * (math.pi / 2)
-			local offset = (step % 2 == 0) and Vector3.zero
-				or Vector3.new(math.cos(angle) * NUDGE_RADIUS, 0, math.sin(angle) * NUDGE_RADIUS)
-			setRootCFrame(root, orbPos + Vector3.new(0, HEIGHT_OFFSET, 0) + offset)
-			tryTouch(root, orb)
+		if not orbPos or (orbPos - anchorPos).Magnitude > ORB_MOVED_DIST then
+			return true -- Orb ถูกเก็บแล้วและกำลังเล่นแอนิเมชัน
 		end
+
+		step += 1
+		local angle = step * (math.pi / 2)
+		local offset = (step % 2 == 0) and Vector3.zero
+			or Vector3.new(math.cos(angle) * NUDGE_RADIUS, 0, math.sin(angle) * NUDGE_RADIUS)
+		setRootCFrame(root, anchorPos + Vector3.new(0, HEIGHT_OFFSET, 0) + offset)
+		tryTouch(root, orb)
 		task.wait(0.15)
 	end
-	return not isOrbAlive(orb)
+	local orbPos = getOrbPosition(orb)
+	return (not isOrbAlive(orb)) or (orbPos ~= nil and (orbPos - anchorPos).Magnitude > ORB_MOVED_DIST)
 end
 
 local function waitInterruptible(seconds, token)
@@ -379,8 +406,13 @@ task.spawn(function()
 
 				local tpStart = os.clock()
 				setRootCFrame(root, orbPos + Vector3.new(0, HEIGHT_OFFSET, 0))
-				local collected = waitForCollect(root, orb, TP_DELAY, token)
+				local collected = waitForCollect(root, orb, orbPos, TP_DELAY, token)
 				local remaining = TP_DELAY - (os.clock() - tpStart)
+
+				if collected then
+					-- Orb ที่เก็บแล้วแต่ยังค้างใน folder (กำลังลอยขึ้น) ห้ามเลือกซ้ำ
+					orbBlacklistUntil[orb] = os.clock() + BLACKLIST_TIME
+				end
 
 				if not collected and isOrbAlive(orb) then
 					-- เก็บไม่ได้ → นับครั้ง ถ้าเกินกำหนดให้ข้ามไปชั่วคราว
