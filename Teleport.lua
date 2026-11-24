@@ -10,8 +10,8 @@ local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 1.1            -- หน่วงต่อการวาร์ป 1 เม็ด (ให้แต้มขึ้นทัน)
-local MAX_SCAN_DISTANCE = 180   -- ระยะค้นหา Orb ใกล้ตัว (Studs)
+local TP_DELAY = 1.1            -- หน่วงต่อการวาร์ป 1 ลูก (ให้แต้มขึ้นทัน)
+local MAX_SCAN_DISTANCE = 220   -- ระยะค้นหา Orb (Studs)
 local MIN_TP_DISTANCE = 2.5     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
 local HEIGHT_OFFSET = 0.5       -- ระดับความสูงเหนือ Orb
 local AUTO_REBIRTH_ENABLED = true
@@ -159,7 +159,7 @@ local function tryAutoRebirth()
 	end
 end
 
--- จำลองการเดินหน้าเหมือนกด W ค้างไว้เฉพาะตอนเปิดอยู่ (พอกดปิดหยุดทันที)
+-- เดินหน้าต่อเนื่องเฉพาะตอนกดเปิด (หยุดทันทีเมื่อกดปิด)
 RunService.RenderStepped:Connect(function()
 	if not isEnabled then return end
 	local humanoid = getCharParts()
@@ -182,17 +182,90 @@ local function getOrbPosition(obj)
 	end
 end
 
-local function findNearestOrbPos(currentPos)
+-- ประเมินค่า EXP / มูลค่าของ Orb แต่ละลูก เพื่อเลือกตัวที่ให้เยอะที่สุด
+local function getOrbExpScore(obj)
+	if not obj or not obj.Parent then return -math.huge end
+
+	local bestScore = 0
+	local foundExplicitValue = false
+
+	-- 1. เช็ก Attributes ที่เกี่ยวกับ EXP / คะแนน / มูลค่า
+	for attrName, attrVal in pairs(obj:GetAttributes()) do
+		if type(attrVal) == "number" then
+			local lower = string.lower(attrName)
+			if string.find(lower, "exp", 1, true)
+				or string.find(lower, "xp", 1, true)
+				or string.find(lower, "val", 1, true)
+				or string.find(lower, "amt", 1, true)
+				or string.find(lower, "amount", 1, true)
+				or string.find(lower, "power", 1, true)
+				or string.find(lower, "reward", 1, true) then
+				foundExplicitValue = true
+				if attrVal > bestScore then
+					bestScore = attrVal
+				end
+			end
+		end
+	end
+
+	-- 2. เช็ก ValueObject ข้างใน (NumberValue / IntValue)
+	for _, desc in ipairs(obj:GetDescendants()) do
+		if desc:IsA("NumberValue") or desc:IsA("IntValue") then
+			local lower = string.lower(desc.Name)
+			if string.find(lower, "exp", 1, true)
+				or string.find(lower, "xp", 1, true)
+				or string.find(lower, "val", 1, true)
+				or string.find(lower, "amt", 1, true)
+				or string.find(lower, "amount", 1, true)
+				or string.find(lower, "power", 1, true)
+				or string.find(lower, "reward", 1, true) then
+				foundExplicitValue = true
+				if desc.Value > bestScore then
+					bestScore = desc.Value
+				end
+			end
+		end
+	end
+
+	if foundExplicitValue then
+		return bestScore
+	end
+
+	-- 3. ถ้าเกมไม่ได้เก็บตัวเลข EXP ไว้ตรงๆ ให้ใช้ขนาด/ปริมาตรของ Orb เป็นตัวประเมิน (ลูกใหญ่/มูลค่าสูงกว่ามักให้ EXP เยอะกว่า)
+	if obj:IsA("BasePart") then
+		local s = obj.Size
+		return s.X * s.Y * s.Z
+	elseif obj:IsA("Model") then
+		local _, size = obj:GetBoundingBox()
+		return size.X * size.Y * size.Z
+	else
+		local part = obj:FindFirstChildWhichIsA("BasePart", true)
+		if part then
+			local s = part.Size
+			return s.X * s.Y * s.Z
+		end
+	end
+
+	return 1
+end
+
+-- เลือกลูกที่ให้ EXP สูงสุดในระยะ MAX_SCAN_DISTANCE (ถ้า EXP เท่ากันจะเลือกตัวที่ใกล้กว่า)
+local function findHighestExpOrbPos(currentPos)
 	local bestPos = nil
-	local bestDist = MAX_SCAN_DISTANCE
+	local bestScore = -math.huge
+	local bestTieDist = math.huge
 
 	for _, child in ipairs(orbsFolder:GetChildren()) do
 		local orbPos = getOrbPosition(child)
 		if orbPos then
 			local dist = (orbPos - currentPos).Magnitude
-			if dist >= MIN_TP_DISTANCE and dist <= bestDist then
-				bestDist = dist
-				bestPos = orbPos
+			if dist >= MIN_TP_DISTANCE and dist <= MAX_SCAN_DISTANCE then
+				local score = getOrbExpScore(child)
+				if (score > bestScore) or (math.abs(score - bestScore) <= 1e-6 and dist < bestTieDist) then
+					bestScore = score
+					bestTieDist = dist
+					bestPos = orbPos
+				end
 			end
 		end
 	end
@@ -244,7 +317,7 @@ task.spawn(function()
 			local token = runToken
 			local _, root = getCharParts()
 			if root and root:IsA("BasePart") then
-				local targetPos = findNearestOrbPos(root.Position)
+				local targetPos = findHighestExpOrbPos(root.Position)
 				if targetPos then
 					teleportToOrb(targetPos)
 				end
