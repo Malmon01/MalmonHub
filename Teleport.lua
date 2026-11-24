@@ -10,8 +10,10 @@ local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 1.2          -- หน่วงเวลา (วินาที) ต่อรอบ ให้คะแนนขึ้นทัน (เพิ่มได้ถ้ายังไวไป)
-local WALK_SPEED_BOOST = 14   -- ความเร็วเดินหน้าต่อเนื่องตอนเปิด (ลด/เพิ่มได้)
+local TP_DELAY = 1.8          -- หน่วง 1.8 วินาทีต่อรอบ (ช้าลงกว่าเดิมให้แต้มขึ้นทัน)
+local MAX_SCAN_DISTANCE = 45  -- เลือกเฉพาะ Orb ใกล้ตัวในระยะไม่เกิน 45 Studs (กันวาร์ปไกล)
+local MIN_TP_DISTANCE = 3     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
+local WALK_SPEED_BOOST = 10   -- ความเร็วเดินหน้าต่อเนื่องตอนเปิด (ลด/เพิ่มได้)
 local HEIGHT_OFFSET = 2.5     -- ความสูงตอนวาร์ปเหนือ Orb
 local AUTO_REBIRTH_ENABLED = true
 local REBIRTH_COOLDOWN = 2.0  -- เวลารอหลังกด Rebirth ก่อนเช็กซ้ำ (วินาที)
@@ -95,7 +97,6 @@ btn.MouseButton1Click:Connect(function()
 	setState(not isEnabled)
 end)
 
--- เช็กว่า GuiObject ทั้งสายมองเห็นอยู่จริงบนหน้าจอหรือไม่
 local function isGuiReallyVisible(guiObj)
 	local current = guiObj
 	while current and current ~= playerGui do
@@ -107,7 +108,6 @@ local function isGuiReallyVisible(guiObj)
 	return true
 end
 
--- ยิงสัญญาณคลิกที่ตำแหน่งกลางปุ่มบนหน้าจอ
 local function clickGuiCenter(guiObj)
 	local absPos = guiObj.AbsolutePosition
 	local absSize = guiObj.AbsoluteSize
@@ -125,7 +125,6 @@ local function clickGuiCenter(guiObj)
 	return true
 end
 
--- ค้นหาปุ่ม REBIRTH! ที่ขึ้นเมื่อพลังตันและกดให้โดยอัตโนมัติ
 local function tryAutoRebirth()
 	if not AUTO_REBIRTH_ENABLED or not isEnabled then return end
 	if os.clock() - lastRebirthTime < REBIRTH_COOLDOWN then return end
@@ -136,7 +135,6 @@ local function tryAutoRebirth()
 				if desc:IsA("TextLabel") or desc:IsA("TextButton") then
 					local upperText = string.upper(desc.Text or "")
 					if string.find(upperText, "REBIRTH", 1, true) and isGuiReallyVisible(desc) then
-						-- มองหาปุ่มที่กดได้ (ตัวมันเอง หรือ Parent ที่เป็นปุ่ม)
 						local clickable = nil
 						if desc:IsA("GuiButton") and desc.Active then
 							clickable = desc
@@ -195,6 +193,38 @@ local function getOrbPosition(obj)
 	end
 end
 
+-- เลือกเฉพาะเม็ดที่ใกล้ตัวที่สุดในระยะ MAX_SCAN_DISTANCE
+local function findNearestOrbPos(currentPos)
+	local bestPos = nil
+	local bestDist = MAX_SCAN_DISTANCE
+
+	for _, child in ipairs(orbsFolder:GetChildren()) do
+		local orbPos = getOrbPosition(child)
+		if orbPos then
+			local dist = (orbPos - currentPos).Magnitude
+			if dist >= MIN_TP_DISTANCE and dist <= bestDist then
+				bestDist = dist
+				bestPos = orbPos
+			end
+		end
+	end
+
+	return bestPos
+end
+
+local function waitInterruptible(seconds, token)
+	local elapsed = 0
+	while elapsed < seconds do
+		if not isEnabled or token ~= runToken then
+			return false
+		end
+		local step = math.min(0.1, seconds - elapsed)
+		task.wait(step)
+		elapsed += step
+	end
+	return isEnabled and (token == runToken)
+end
+
 local function teleportToOrb(orbPos)
 	local _, root = getCharParts()
 	if not root or not root:IsA("BasePart") then return end
@@ -211,7 +241,7 @@ local function teleportToOrb(orbPos)
 	end)
 end
 
--- ลูป Auto Rebirth แยกต่างหาก จะทำงานเฉพาะตอนเปิดระบบ
+-- ลูป Auto Rebirth เฉพาะตอนเปิดระบบ
 task.spawn(function()
 	while true do
 		if isEnabled then
@@ -221,33 +251,22 @@ task.spawn(function()
 	end
 end)
 
--- ลูปวาร์ปไปหา Orb แบบช้าลงให้คะแนนขึ้นทัน
+-- ลูปวาร์ปไปหา Orb ที่ใกล้ตัวที่สุดแบบช้าลง
 task.spawn(function()
 	while true do
 		if isEnabled then
 			local token = runToken
-			local children = orbsFolder:GetChildren()
-
-			for _, child in ipairs(children) do
-				if not isEnabled or token ~= runToken then
-					break
-				end
-
-				local orbPos = getOrbPosition(child)
-				if orbPos then
-					teleportToOrb(orbPos)
-					local waited = 0
-					while waited < TP_DELAY do
-						if not isEnabled or token ~= runToken then
-							break
-						end
-						task.wait(0.1)
-						waited += 0.1
-					end
+			local _, root = getCharParts()
+			if root and root:IsA("BasePart") then
+				local targetPos = findNearestOrbPos(root.Position)
+				if targetPos then
+					teleportToOrb(targetPos)
 				end
 			end
 
-			task.wait(0.1)
+			if not waitInterruptible(TP_DELAY, token) then
+				stopAllMovement()
+			end
 		else
 			stopAllMovement()
 			task.wait(0.2)
