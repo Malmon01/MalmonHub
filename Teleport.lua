@@ -10,10 +10,11 @@ local orbsFolder = Workspace:WaitForChild("ClientOrbs")
 
 -- ================= ตั้งค่า =================
 local DEFAULT_ENABLED = false
-local TP_DELAY = 1.8          -- หน่วง 1.8 วินาทีต่อรอบ (ช้าลงกว่าเดิมให้แต้มขึ้นทัน)
-local MAX_SCAN_DISTANCE = 45  -- เลือกเฉพาะ Orb ใกล้ตัวในระยะไม่เกิน 45 Studs (กันวาร์ปไกล)
-local MIN_TP_DISTANCE = 3     -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
-local WALK_SPEED_BOOST = 10   -- ความเร็วเดินหน้าต่อเนื่องตอนเปิด (ลด/เพิ่มได้)
+local TP_DELAY = 2.0          -- หน่วง 2 วินาทีต่อรอบ ให้แต้มขึ้นทัน
+local MAX_SCAN_DISTANCE = 25  -- เก็บเฉพาะเม็ดใกล้ตัวมาก (กันหลุดโซน/ตกน้ำ)
+local MIN_TP_DISTANCE = 2.5   -- ระยะใกล้สุดที่ไม่ต้องวาร์ปซ้ำ
+local MAX_DROP_HEIGHT = 6     -- กันวาร์ปลงจุดที่ต่ำกว่าตัวละครเกินไป (เช่น ผิวน้ำ/หลุม)
+local WALK_SPEED_BOOST = 9    -- ความเร็วเดินหน้าต่อเนื่องตอนเปิด (หยุดทันทีเมื่อปิด)
 local HEIGHT_OFFSET = 2.5     -- ความสูงตอนวาร์ปเหนือ Orb
 local AUTO_REBIRTH_ENABLED = true
 local REBIRTH_COOLDOWN = 2.0  -- เวลารอหลังกด Rebirth ก่อนเช็กซ้ำ (วินาที)
@@ -193,7 +194,6 @@ local function getOrbPosition(obj)
 	end
 end
 
--- เลือกเฉพาะเม็ดที่ใกล้ตัวที่สุดในระยะ MAX_SCAN_DISTANCE
 local function findNearestOrbPos(currentPos)
 	local bestPos = nil
 	local bestDist = MAX_SCAN_DISTANCE
@@ -201,8 +201,9 @@ local function findNearestOrbPos(currentPos)
 	for _, child in ipairs(orbsFolder:GetChildren()) do
 		local orbPos = getOrbPosition(child)
 		if orbPos then
+			local isTooLow = orbPos.Y < (currentPos.Y - MAX_DROP_HEIGHT)
 			local dist = (orbPos - currentPos).Magnitude
-			if dist >= MIN_TP_DISTANCE and dist <= bestDist then
+			if not isTooLow and dist >= MIN_TP_DISTANCE and dist <= bestDist then
 				bestDist = dist
 				bestPos = orbPos
 			end
@@ -241,7 +242,6 @@ local function teleportToOrb(orbPos)
 	end)
 end
 
--- ลูป Auto Rebirth เฉพาะตอนเปิดระบบ
 task.spawn(function()
 	while true do
 		if isEnabled then
@@ -251,7 +251,6 @@ task.spawn(function()
 	end
 end)
 
--- ลูปวาร์ปไปหา Orb ที่ใกล้ตัวที่สุดแบบช้าลง
 task.spawn(function()
 	while true do
 		if isEnabled then
