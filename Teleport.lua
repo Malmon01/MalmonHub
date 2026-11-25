@@ -1,5 +1,5 @@
 -- ===== Orb Teleport + Auto Mutate (รวมไฟล์) =====
--- ปุ่ม TP ORB = วาร์ปเก็บ Orb | ปุ่ม AUTO MUTATE = กด Roll + Skip อัตโนมัติ
+-- ปุ่ม TP ORB = วาร์ปเก็บ Orb | ปุ่ม AUTO MUTATE = กด Roll + Skip อัตโนมัติจนกว่าจะกดปิด
 
 -- ================= ส่วนที่ 1: ORB TELEPORT =================
 do
@@ -445,8 +445,10 @@ end
 
 -- ================= ส่วนที่ 2: AUTO MUTATE =================
 do
-	-- Auto Roll + Skip สำหรับหน้า MUTATE
-	-- วิธีใช้: เปิดหน้า Mutate ค้างไว้ แล้วกดปุ่ม "AUTO MUTATE: ON"
+	-- Auto Roll + Skip สำหรับหน้า MUTATE (ทำงานไปเรื่อย ๆ จนกว่าจะกดปิดเอง)
+	-- โครงสร้างจาก Dex:
+	--   PlayerGui.AntMutate.Root.Window.Panel.Body.Right.Buttons.Roll1Ho...  -> ปุ่ม ROLL (1 Token)
+	--   PlayerGui.AntMutate.Root.Window.Panel.Body.Right.Info.SkipHo...      -> ปุ่ม SKIP
 	local Players = game:GetService("Players")
 	local VirtualInputManager = game:GetService("VirtualInputManager")
 	local GuiService = game:GetService("GuiService")
@@ -455,16 +457,13 @@ do
 	local playerGui = player:WaitForChild("PlayerGui")
 
 	-- ================= ตั้งค่า =================
-	local LOOP_DELAY = 0.25         -- ความถี่การเช็ค (วินาที)
-	local ROLL_COOLDOWN = 0.6       -- เว้นระยะหลังกด ROLL
-	local SKIP_COOLDOWN = 0.3       -- เว้นระยะหลังกด SKIP
-	local NO_RESPONSE_LIMIT = 3     -- กด ROLL แล้วไม่หมุนติดกันกี่ครั้ง = Token หมด → ปิดเอง
+	local LOOP_DELAY = 0.2          -- ความถี่การเช็ค (วินาที)
+	local ROLL_COOLDOWN = 0.5       -- เว้นระยะหลังกด ROLL
+	local SKIP_COOLDOWN = 0.25      -- เว้นระยะหลังกด SKIP
 	-- ==========================================
 
 	local isEnabled = false
 	local lastRollTime, lastSkipTime = 0, 0
-	local noResponseCount = 0
-	local waitingForRoll = false
 
 	local old = playerGui:FindFirstChild("AutoMutateGui")
 	if old then old:Destroy() end
@@ -490,15 +489,13 @@ do
 	stroke.Color = Color3.fromRGB(15, 15, 15)
 	stroke.Thickness = 2
 
-	local function setState(state, reason)
+	local function setState(state)
 		isEnabled = state
-		noResponseCount = 0
-		waitingForRoll = false
 		if isEnabled then
 			btn.Text = "AUTO MUTATE: ON"
 			btn.BackgroundColor3 = Color3.fromRGB(142, 68, 173)
 		else
-			btn.Text = reason and ("AUTO MUTATE: OFF (" .. reason .. ")") or "AUTO MUTATE: OFF"
+			btn.Text = "AUTO MUTATE: OFF"
 			btn.BackgroundColor3 = Color3.fromRGB(192, 57, 43)
 		end
 	end
@@ -510,48 +507,84 @@ do
 		local cur = gui
 		while cur and cur ~= playerGui do
 			if cur:IsA("GuiObject") and not cur.Visible then return false end
-			if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+			if cur:IsA("LayerCollector") and not cur.Enabled then return false end
 			cur = cur.Parent
 		end
-		return gui.AbsoluteSize.X > 5 and gui.AbsoluteSize.Y > 5
+		return gui.AbsoluteSize.X > 2 and gui.AbsoluteSize.Y > 2
 	end
 
-	local function textOf(obj)
-		local ok, t = pcall(function() return obj.ContentText end)
-		if not ok or not t or t == "" then t = obj.Text or "" end
-		return string.upper(t)
+	local function startsWith(s, prefix)
+		return string.sub(string.lower(s), 1, #prefix) == string.lower(prefix)
 	end
 
-	-- รวมข้อความทั้งหมดในปุ่ม (ปุ่มเกมนี้มี "ROLL" กับ "1 TOKEN" เป็น label แยกกัน)
-	local function buttonText(button)
-		local parts = {}
-		if button:IsA("TextButton") then table.insert(parts, textOf(button)) end
-		for _, d in ipairs(button:GetDescendants()) do
-			if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Visible then
-				table.insert(parts, textOf(d))
+	-- เส้นทาง Right ของหน้า Mutate
+	local function getMutateRight()
+		local g = playerGui:FindFirstChild("AntMutate")
+		if not g then return nil end
+		local ok, right = pcall(function()
+			return g.Root.Window.Panel.Body.Right
+		end)
+		if ok and right then return right end
+		-- สำรอง: หา "Right" ที่ไหนก็ได้ใน AntMutate
+		return g:FindFirstChild("Right", true)
+	end
+
+	-- หา GuiButton จาก "Holder" (ตัวมันเอง / ลูกหลาน / บรรพบุรุษ)
+	local function resolveButton(obj, preferName)
+		if not obj then return nil end
+		if obj:IsA("GuiButton") then return obj end
+		if preferName then
+			for _, d in ipairs(obj:GetDescendants()) do
+				if d:IsA("GuiButton") and startsWith(d.Name, preferName) then return d end
 			end
 		end
-		return table.concat(parts, " ")
+		local d = obj:FindFirstChildWhichIsA("GuiButton", true)
+		if d then return d end
+		local a = obj:FindFirstAncestorWhichIsA("GuiButton")
+		return a
+	end
+
+	local function findHolder(parent, prefix)
+		if not parent then return nil end
+		for _, c in ipairs(parent:GetChildren()) do
+			if startsWith(c.Name, prefix) then return c end
+		end
+		return nil
+	end
+
+	local function getRollButton(right)
+		local buttons = right and right:FindFirstChild("Buttons")
+		local holder = findHolder(buttons, "Roll1")
+		return resolveButton(holder, "Roll")
+	end
+
+	local function getSkipButton(right)
+		local info = right and right:FindFirstChild("Info")
+		local holder = findHolder(info, "SkipHo") or findHolder(info, "Skip")
+		return resolveButton(holder, "Skip")
 	end
 
 	local function clickButton(button)
-		-- วิธีที่ 1: ยิง event ตรง (เสถียรกว่าบนมือถือ/emulator)
+		-- วิธีที่ 1: firesignal / getconnections (เสถียรสุดบน emulator)
 		local fired = false
-		if typeof(getconnections) == "function" then
-			for _, sigName in ipairs({ "Activated", "MouseButton1Click", "MouseButton1Down", "MouseButton1Up" }) do
-				local ok, conns = pcall(getconnections, button[sigName])
+		for _, sigName in ipairs({ "Activated", "MouseButton1Click", "MouseButton1Down", "MouseButton1Up" }) do
+			local sig = button[sigName]
+			if typeof(firesignal) == "function" then
+				if pcall(firesignal, sig) then fired = true end
+			elseif typeof(getconnections) == "function" then
+				local ok, conns = pcall(getconnections, sig)
 				if ok and conns then
 					for _, c in ipairs(conns) do
-						local fok = pcall(function()
+						if pcall(function()
 							if c.Fire then c:Fire() elseif c.Function then c.Function() end
-						end)
-						fired = fired or fok
+						end) then fired = true end
 					end
 				end
-				if fired then return true end
 			end
+			if fired then return end
 		end
-		-- วิธีที่ 2: คลิกจำลองตรงกลางปุ่ม
+
+		-- วิธีที่ 2: คลิก/แตะจำลองตรงกลางปุ่ม
 		local pos, size = button.AbsolutePosition, button.AbsoluteSize
 		local inset = GuiService:GetGuiInset()
 		local x = pos.X + size.X / 2 + inset.X
@@ -561,70 +594,34 @@ do
 			task.wait(0.05)
 			VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
 		end)
-		return true
+		pcall(function()
+			VirtualInputManager:SendTouchEvent(1, 0, x, y) -- Begin
+			task.wait(0.05)
+			VirtualInputManager:SendTouchEvent(1, 2, x, y) -- End
+		end)
 	end
 
-	-- หาปุ่ม SKIP / ROLL (1 Token) และสถานะกำลังหมุน
-	local function scanMutate()
-		local skipBtn, rollBtn, rolling = nil, nil, false
-		for _, gui in ipairs(playerGui:GetChildren()) do
-			if gui ~= screenGui and gui:IsA("ScreenGui") and gui.Enabled then
-				for _, d in ipairs(gui:GetDescendants()) do
-					if d:IsA("GuiButton") and isReallyVisible(d) then
-						local t = buttonText(d)
-						if string.find(t, "SKIP", 1, true) then
-							skipBtn = d
-						elseif string.find(t, "ROLL", 1, true)
-							and string.find(t, "1 TOKEN", 1, true)
-							and not string.find(t, "X5", 1, true)
-							and not string.find(t, "5 TOKEN", 1, true) then
-							rollBtn = d
-						end
-						if string.find(t, "ROLLING", 1, true) then
-							rolling = true
-						end
-					end
-				end
-			end
-		end
-		return skipBtn, rollBtn, rolling
-	end
-
-	-- ---------- main loop ----------
+	-- ---------- main loop (ไม่มีปิดเอง ทำจนกว่าจะกด OFF) ----------
 	task.spawn(function()
 		while true do
 			if isEnabled then
 				local ok, err = pcall(function()
-					local skipBtn, rollBtn, rolling = scanMutate()
+					local right = getMutateRight()
+					if not right or not isReallyVisible(right) then return end -- หน้า Mutate ไม่ได้เปิด
+
 					local now = os.clock()
-
-					-- 1) กำลังหมุน → กด SKIP
-					if skipBtn and now - lastSkipTime >= SKIP_COOLDOWN then
-						lastSkipTime = now
-						waitingForRoll = false
-						noResponseCount = 0
-						clickButton(skipBtn)
-						return
-					end
-
-					if rolling then
-						waitingForRoll = false
-						noResponseCount = 0
-						return
-					end
-
-					-- 2) ว่างอยู่ → กด ROLL
-					if rollBtn and now - lastRollTime >= ROLL_COOLDOWN then
-						if waitingForRoll then
-							-- กดรอบที่แล้วไม่มีอะไรเกิดขึ้น
-							noResponseCount += 1
-							if noResponseCount >= NO_RESPONSE_LIMIT then
-								setState(false, "หมด Token?")
-								return
-							end
+					local skipBtn = getSkipButton(right)
+					if skipBtn and isReallyVisible(skipBtn) then
+						if now - lastSkipTime >= SKIP_COOLDOWN then
+							lastSkipTime = now
+							clickButton(skipBtn)
 						end
+						return
+					end
+
+					local rollBtn = getRollButton(right)
+					if rollBtn and isReallyVisible(rollBtn) and now - lastRollTime >= ROLL_COOLDOWN then
 						lastRollTime = now
-						waitingForRoll = true
 						clickButton(rollBtn)
 					end
 				end)
