@@ -1,5 +1,5 @@
 -- ===== Orb Teleport + Auto Mutate x5 (รวมไฟล์) =====
--- ปุ่ม TP ORB = วาร์ปเก็บ Orb | ปุ่ม AUTO MUTATE x5 = สุ่ม x5 + Skip ไว ๆ ไม่ต้องเปิดหน้าต่าง
+-- ปุ่ม TP ORB = วาร์ปเก็บ Orb + Auto Rebirth | ปุ่ม AUTO MUTATE x5 = สุ่ม x5 + Skip (หยุดให้ตอนรี)
 
 -- ================= ส่วนที่ 1: ORB TELEPORT =================
 do
@@ -143,7 +143,28 @@ do
 
 							if clickable and clickable.AbsoluteSize.X > 20 then
 								lastRebirthTime = os.clock()
-								clickGuiCenter(clickable)
+								-- บอก Auto Mutate ให้หยุดสุ่มชั่วคราว แล้วรอให้หน้าผลสุ่มปิดก่อนกด
+								local Shared = (typeof(getgenv) == "function" and getgenv()) or _G
+								Shared.AntMutatePauseUntil = math.max(Shared.AntMutatePauseUntil or 0, os.clock() + 3)
+								task.wait(0.3)
+								-- ยิง event ตรง ๆ ก่อน (ไม่โดนหน้าต่างอื่นบัง) ถ้าไม่ได้ค่อยคลิกจำลอง
+								local fired = false
+								if typeof(getconnections) == "function" then
+									for _, sigName in ipairs({ "Activated", "MouseButton1Click", "MouseButton1Down" }) do
+										local ok, conns = pcall(getconnections, clickable[sigName])
+										if ok and conns then
+											for _, c in ipairs(conns) do
+												if pcall(function()
+													if c.Fire then c:Fire() elseif c.Function then task.spawn(c.Function) end
+												end) then fired = true end
+											end
+										end
+										if fired then break end
+									end
+								end
+								if not fired then
+									clickGuiCenter(clickable)
+								end
 								pcall(function()
 									VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
 									task.wait(0.05)
@@ -459,9 +480,13 @@ do
 	local SKIP_SPAM = 3             -- กด Skip ซ้ำกี่ครั้งหลัง Roll
 	local SKIP_GAP = 0.03           -- ระยะห่างระหว่างการกด Skip
 	local ROLL_BUTTON = "Roll5"     -- เปลี่ยนเป็น "Roll1" ถ้าอยากสุ่มทีละ 1
+	local PAUSE_FOR_REBIRTH = true  -- หยุดสุ่มชั่วคราวเมื่อปุ่ม REBIRTH ขึ้น (ให้รีได้ทันที)
+	local REBIRTH_PAUSE_AFTER = 2.5 -- หยุดต่ออีกกี่วินาทีหลังปุ่ม REBIRTH หายไป
 	-- ==========================================
 
 	local isEnabled = false
+	local Shared = (typeof(getgenv) == "function" and getgenv()) or _G
+	Shared.AntMutatePauseUntil = Shared.AntMutatePauseUntil or 0
 
 	local old = playerGui:FindFirstChild("AutoMutateGui")
 	if old then old:Destroy() end
@@ -568,6 +593,56 @@ do
 		return false
 	end
 
+	-- ---------- ตรวจปุ่ม REBIRTH (สแกนทุก 1 วินาที ไม่หน่วงเกม) ----------
+	local rebirthButtons = {}
+
+	local function isReallyVisible(gui)
+		local cur = gui
+		while cur and cur ~= playerGui do
+			if cur:IsA("GuiObject") and not cur.Visible then return false end
+			if cur:IsA("LayerCollector") and not cur.Enabled then return false end
+			cur = cur.Parent
+		end
+		return gui.AbsoluteSize.X > 2 and gui.AbsoluteSize.Y > 2
+	end
+
+	local function textOf(obj)
+		local ok, t = pcall(function() return obj.ContentText end)
+		if not ok or not t or t == "" then t = obj.Text or "" end
+		return string.upper(t)
+	end
+
+	task.spawn(function()
+		while true do
+			if isEnabled and PAUSE_FOR_REBIRTH then
+				local found = {}
+				for _, gui in ipairs(playerGui:GetChildren()) do
+					if gui:IsA("ScreenGui") and gui ~= screenGui and gui.Name ~= "OrbTpGui"
+						and gui.Name ~= "AntMutate" and gui.Name ~= "AntMutateReveal" then
+						for _, d in ipairs(gui:GetDescendants()) do
+							-- นับเฉพาะ "ปุ่ม" Rebirth (กันไปเจอข้อความเควสที่มีคำว่า Rebirth)
+							if (d:IsA("TextLabel") or d:IsA("TextButton"))
+								and string.find(textOf(d), "REBIRTH", 1, true) then
+								local b = d:IsA("GuiButton") and d
+									or (d.Parent and d.Parent:IsA("GuiButton") and d.Parent)
+								if b then table.insert(found, b) end
+							end
+						end
+					end
+				end
+				rebirthButtons = found
+			end
+			task.wait(1)
+		end
+	end)
+
+	local function rebirthIsUp()
+		for _, d in ipairs(rebirthButtons) do
+			if d.Parent and isReallyVisible(d) then return true end
+		end
+		return false
+	end
+
 	-- ---------- main loop ----------
 	local warned = false
 	task.spawn(function()
@@ -583,6 +658,15 @@ do
 						return
 					end
 					warned = false
+
+					-- ปุ่ม REBIRTH ขึ้น → หยุดสุ่ม ปิดหน้าผลสุ่มให้ แล้วรอจนรีเสร็จ
+					if PAUSE_FOR_REBIRTH and rebirthIsUp() then
+						Shared.AntMutatePauseUntil = math.max(Shared.AntMutatePauseUntil, os.clock() + REBIRTH_PAUSE_AFTER)
+					end
+					if os.clock() < Shared.AntMutatePauseUntil then
+						fireButton(skipBtn)
+						return
+					end
 
 					fireButton(rollBtn)
 					for _ = 1, SKIP_SPAM do
