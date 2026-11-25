@@ -1,5 +1,5 @@
--- ===== Orb Teleport + Auto Mutate (รวมไฟล์) =====
--- ปุ่ม TP ORB = วาร์ปเก็บ Orb | ปุ่ม AUTO MUTATE = กด Roll + Skip อัตโนมัติจนกว่าจะกดปิด
+-- ===== Orb Teleport + Auto Mutate x5 (รวมไฟล์) =====
+-- ปุ่ม TP ORB = วาร์ปเก็บ Orb | ปุ่ม AUTO MUTATE x5 = สุ่ม x5 + Skip ไว ๆ ไม่ต้องเปิดหน้าต่าง
 
 -- ================= ส่วนที่ 1: ORB TELEPORT =================
 do
@@ -443,27 +443,25 @@ do
 	end)
 end
 
--- ================= ส่วนที่ 2: AUTO MUTATE =================
+-- ================= ส่วนที่ 2: AUTO MUTATE x5 =================
 do
-	-- Auto Roll + Skip สำหรับหน้า MUTATE (ทำงานไปเรื่อย ๆ จนกว่าจะกดปิดเอง)
+	-- Auto Roll x5 + Skip สำหรับ MUTATE (ไม่ต้องเปิดหน้าต่าง, ทำจนกว่าจะกดปิดเอง)
 	-- โครงสร้างจาก Dex:
-	--   PlayerGui.AntMutate.Root.Window.Panel.Body.Right.Buttons.Roll1Ho...  -> ปุ่ม ROLL (1 Token)
-	--   PlayerGui.AntMutate.Root.Window.Panel.Body.Right.Info.SkipHo...      -> ปุ่ม SKIP
+	--   PlayerGui.AntMutate.Root.Window.Panel.Body.Right.Buttons.Roll5Ho... -> ปุ่ม ROLL x5
+	--   PlayerGui.AntMutate.Root.Window.Panel.Body.Right.Info.SkipHo...     -> ปุ่ม SKIP
 	local Players = game:GetService("Players")
-	local VirtualInputManager = game:GetService("VirtualInputManager")
-	local GuiService = game:GetService("GuiService")
 
 	local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
 	local playerGui = player:WaitForChild("PlayerGui")
 
 	-- ================= ตั้งค่า =================
-	local LOOP_DELAY = 0.2          -- ความถี่การเช็ค (วินาที)
-	local ROLL_COOLDOWN = 0.5       -- เว้นระยะหลังกด ROLL
-	local SKIP_COOLDOWN = 0.25      -- เว้นระยะหลังกด SKIP
+	local ROLL_DELAY = 0.15         -- เวลาระหว่างการกด Roll x5 แต่ละครั้ง (ยิ่งน้อยยิ่งไว)
+	local SKIP_SPAM = 3             -- กด Skip ซ้ำกี่ครั้งหลัง Roll
+	local SKIP_GAP = 0.03           -- ระยะห่างระหว่างการกด Skip
+	local ROLL_BUTTON = "Roll5"     -- เปลี่ยนเป็น "Roll1" ถ้าอยากสุ่มทีละ 1
 	-- ==========================================
 
 	local isEnabled = false
-	local lastRollTime, lastSkipTime = 0, 0
 
 	local old = playerGui:FindFirstChild("AutoMutateGui")
 	if old then old:Destroy() end
@@ -492,56 +490,27 @@ do
 	local function setState(state)
 		isEnabled = state
 		if isEnabled then
-			btn.Text = "AUTO MUTATE: ON"
+			btn.Text = "AUTO MUTATE x5: ON"
 			btn.BackgroundColor3 = Color3.fromRGB(142, 68, 173)
 		else
-			btn.Text = "AUTO MUTATE: OFF"
+			btn.Text = "AUTO MUTATE x5: OFF"
 			btn.BackgroundColor3 = Color3.fromRGB(192, 57, 43)
 		end
 	end
 	setState(false)
 	btn.MouseButton1Click:Connect(function() setState(not isEnabled) end)
 
-	-- ---------- helpers ----------
-	local function isReallyVisible(gui)
-		local cur = gui
-		while cur and cur ~= playerGui do
-			if cur:IsA("GuiObject") and not cur.Visible then return false end
-			if cur:IsA("LayerCollector") and not cur.Enabled then return false end
-			cur = cur.Parent
-		end
-		return gui.AbsoluteSize.X > 2 and gui.AbsoluteSize.Y > 2
-	end
-
+	-- ---------- หาปุ่ม ----------
 	local function startsWith(s, prefix)
 		return string.sub(string.lower(s), 1, #prefix) == string.lower(prefix)
 	end
 
-	-- เส้นทาง Right ของหน้า Mutate
 	local function getMutateRight()
 		local g = playerGui:FindFirstChild("AntMutate")
 		if not g then return nil end
-		local ok, right = pcall(function()
-			return g.Root.Window.Panel.Body.Right
-		end)
+		local ok, right = pcall(function() return g.Root.Window.Panel.Body.Right end)
 		if ok and right then return right end
-		-- สำรอง: หา "Right" ที่ไหนก็ได้ใน AntMutate
 		return g:FindFirstChild("Right", true)
-	end
-
-	-- หา GuiButton จาก "Holder" (ตัวมันเอง / ลูกหลาน / บรรพบุรุษ)
-	local function resolveButton(obj, preferName)
-		if not obj then return nil end
-		if obj:IsA("GuiButton") then return obj end
-		if preferName then
-			for _, d in ipairs(obj:GetDescendants()) do
-				if d:IsA("GuiButton") and startsWith(d.Name, preferName) then return d end
-			end
-		end
-		local d = obj:FindFirstChildWhichIsA("GuiButton", true)
-		if d then return d end
-		local a = obj:FindFirstAncestorWhichIsA("GuiButton")
-		return a
 	end
 
 	local function findHolder(parent, prefix)
@@ -552,82 +521,80 @@ do
 		return nil
 	end
 
-	local function getRollButton(right)
-		local buttons = right and right:FindFirstChild("Buttons")
-		local holder = findHolder(buttons, "Roll1")
-		return resolveButton(holder, "Roll")
+	local function resolveButton(obj, preferName)
+		if not obj then return nil end
+		if obj:IsA("GuiButton") then return obj end
+		for _, d in ipairs(obj:GetDescendants()) do
+			if d:IsA("GuiButton") and startsWith(d.Name, preferName) then return d end
+		end
+		return obj:FindFirstChildWhichIsA("GuiButton", true) or obj:FindFirstAncestorWhichIsA("GuiButton")
 	end
 
-	local function getSkipButton(right)
-		local info = right and right:FindFirstChild("Info")
-		local holder = findHolder(info, "SkipHo") or findHolder(info, "Skip")
-		return resolveButton(holder, "Skip")
+	local cachedRoll, cachedSkip
+	local function getButtons()
+		if cachedRoll and cachedRoll.Parent and cachedSkip and cachedSkip.Parent then
+			return cachedRoll, cachedSkip
+		end
+		local right = getMutateRight()
+		if not right then return nil, nil end
+		cachedRoll = resolveButton(findHolder(right:FindFirstChild("Buttons"), ROLL_BUTTON), "Roll")
+		local info = right:FindFirstChild("Info")
+		cachedSkip = resolveButton(findHolder(info, "SkipHo") or findHolder(info, "Skip"), "Skip")
+		return cachedRoll, cachedSkip
 	end
 
-	local function clickButton(button)
-		-- วิธีที่ 1: firesignal / getconnections (เสถียรสุดบน emulator)
-		local fired = false
-		for _, sigName in ipairs({ "Activated", "MouseButton1Click", "MouseButton1Down", "MouseButton1Up" }) do
+	-- ---------- ยิง event ของปุ่มตรง ๆ (ทำงานได้แม้หน้าต่างปิดอยู่) ----------
+	local SIGNALS = { "Activated", "MouseButton1Click", "MouseButton1Down", "MouseButton1Up" }
+
+	local function fireButton(button)
+		if not button then return false end
+		for _, sigName in ipairs(SIGNALS) do
 			local sig = button[sigName]
-			if typeof(firesignal) == "function" then
-				if pcall(firesignal, sig) then fired = true end
-			elseif typeof(getconnections) == "function" then
+			local fired = false
+			if typeof(getconnections) == "function" then
 				local ok, conns = pcall(getconnections, sig)
 				if ok and conns then
 					for _, c in ipairs(conns) do
 						if pcall(function()
-							if c.Fire then c:Fire() elseif c.Function then c.Function() end
+							if c.Fire then c:Fire() elseif c.Function then task.spawn(c.Function) end
 						end) then fired = true end
 					end
 				end
+			elseif typeof(firesignal) == "function" then
+				fired = pcall(firesignal, sig)
 			end
-			if fired then return end
+			if fired then return true end -- ยิงแค่ signal แรกที่มีคนฟัง กันกดซ้อน
 		end
-
-		-- วิธีที่ 2: คลิก/แตะจำลองตรงกลางปุ่ม
-		local pos, size = button.AbsolutePosition, button.AbsoluteSize
-		local inset = GuiService:GetGuiInset()
-		local x = pos.X + size.X / 2 + inset.X
-		local y = pos.Y + size.Y / 2 + inset.Y
-		pcall(function()
-			VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
-			task.wait(0.05)
-			VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
-		end)
-		pcall(function()
-			VirtualInputManager:SendTouchEvent(1, 0, x, y) -- Begin
-			task.wait(0.05)
-			VirtualInputManager:SendTouchEvent(1, 2, x, y) -- End
-		end)
+		return false
 	end
 
-	-- ---------- main loop (ไม่มีปิดเอง ทำจนกว่าจะกด OFF) ----------
+	-- ---------- main loop ----------
+	local warned = false
 	task.spawn(function()
 		while true do
 			if isEnabled then
 				local ok, err = pcall(function()
-					local right = getMutateRight()
-					if not right or not isReallyVisible(right) then return end -- หน้า Mutate ไม่ได้เปิด
-
-					local now = os.clock()
-					local skipBtn = getSkipButton(right)
-					if skipBtn and isReallyVisible(skipBtn) then
-						if now - lastSkipTime >= SKIP_COOLDOWN then
-							lastSkipTime = now
-							clickButton(skipBtn)
+					local rollBtn, skipBtn = getButtons()
+					if not rollBtn then
+						if not warned then
+							warned = true
+							warn("[AutoMutate] หาปุ่ม " .. ROLL_BUTTON .. " ไม่เจอ ลองเปิดหน้า Mutate 1 ครั้งก่อน")
 						end
 						return
 					end
+					warned = false
 
-					local rollBtn = getRollButton(right)
-					if rollBtn and isReallyVisible(rollBtn) and now - lastRollTime >= ROLL_COOLDOWN then
-						lastRollTime = now
-						clickButton(rollBtn)
+					fireButton(rollBtn)
+					for _ = 1, SKIP_SPAM do
+						task.wait(SKIP_GAP)
+						fireButton(skipBtn)
 					end
 				end)
 				if not ok then warn("[AutoMutate] error:", err) end
+				task.wait(ROLL_DELAY)
+			else
+				task.wait(0.2)
 			end
-			task.wait(LOOP_DELAY)
 		end
 	end)
 end
