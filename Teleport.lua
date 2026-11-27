@@ -16,7 +16,7 @@ do
 
 	-- ================= ตั้งค่า =================
 	local DEFAULT_ENABLED = false
-	local TWEEN_SPEED = 70          -- ความเร็ว Tween (studs/วินาที) ยิ่งมากยิ่งไว แต่เสี่ยงโดนเตะ
+	local TWEEN_SPEED = 150          -- ความเร็ว Tween (studs/วินาที) ยิ่งมากยิ่งไว แต่เสี่ยงโดนเตะ
 	local TWEEN_MIN_TIME = 0.08     -- เวลา Tween ขั้นต่ำ
 	local COLLECT_WAIT = 0.5        -- รอเก็บ Orb หลังไปถึงนานสุดกี่วินาที
 	local MAX_SCAN_DISTANCE = 220   -- ระยะค้นหา Orb (Studs)
