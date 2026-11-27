@@ -1,5 +1,5 @@
 -- ===== Orb Tween + Auto Mutate x5 (รวมไฟล์) =====
--- ปุ่ม TP ORB = Tween เก็บ Orb ที่ใกล้สุด + Auto Rebirth | ปุ่ม AUTO MUTATE x5 = สุ่ม x5 + Skip (หยุดให้ตอนรี)
+-- ปุ่ม TP ORB = Tween เก็บ Orb ที่ใกล้สุด (หยุดตอนเป็นดักแด้) + Auto Rebirth | ปุ่ม AUTO MUTATE x5 = สุ่ม x5 + Skip
 
 -- ================= ส่วนที่ 1: ORB TWEEN =================
 do
@@ -16,7 +16,7 @@ do
 
 	-- ================= ตั้งค่า =================
 	local DEFAULT_ENABLED = false
-	local TWEEN_SPEED = 300          -- ความเร็ว Tween (studs/วินาที) ยิ่งมากยิ่งไว แต่เสี่ยงโดนเตะ
+	local TWEEN_SPEED = 130         -- ความเร็ว Tween (studs/วินาที) ยิ่งมากยิ่งไว แต่เสี่ยงโดนเตะ
 	local TWEEN_MIN_TIME = 0.08     -- เวลา Tween ขั้นต่ำ
 	local COLLECT_WAIT = 0.5        -- รอเก็บ Orb หลังไปถึงนานสุดกี่วินาที
 	local MAX_SCAN_DISTANCE = 220   -- ระยะค้นหา Orb (Studs)
@@ -28,11 +28,16 @@ do
 	local ORB_MOVED_DIST = 4        -- Orb ขยับออกจากจุดเดิมเกินนี้ = ถูกเก็บแล้ว (กำลังเล่นแอนิเมชันลอยขึ้น)
 	local AUTO_REBIRTH_ENABLED = true
 	local REBIRTH_COOLDOWN = 2.0
+	local PAUSE_WHEN_COCOON = true
+	local COCOON_RESUME_DELAY = 1.5
 	-- ==========================================
 
 	local isEnabled = (DEFAULT_ENABLED == true)
 	local runToken = 0
 	local lastRebirthTime = 0
+	local lastCocoonTime = -math.huge
+	local cocoonGuiScanTime = -math.huge
+	local cocoonGuiTextDetected = false
 
 	-- เก็บสถานะของแต่ละ Orb (weak key = Orb ถูกลบแล้วข้อมูลหายเอง)
 	local orbAttempts = setmetatable({}, { __mode = "k" })
@@ -111,6 +116,79 @@ do
 		return true
 	end
 
+	local function isCocoon()
+		local char = player.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		local detected = false
+
+		if char and hum and (hum.WalkSpeed <= 0.5 or hum.PlatformStand) then detected = true end
+		if root and root.Anchored then detected = true end
+
+		local nameTokens = { "cocoon", "pupa", "chrysalis", "evolv", "molt" }
+		local function hasCocoonAttribute(inst)
+			if not inst then return false end
+			for attrName, value in pairs(inst:GetAttributes()) do
+				local lowerName = string.lower(attrName)
+				local matchesName = false
+				for _, token in ipairs(nameTokens) do
+					if string.find(lowerName, token, 1, true) then matchesName = true break end
+				end
+				if matchesName and (value == true or (type(value) == "string" and value ~= "")
+					or (type(value) == "number" and value > 0)) then return true end
+			end
+			return false
+		end
+		if hasCocoonAttribute(char) or hasCocoonAttribute(hum) or hasCocoonAttribute(root)
+			or hasCocoonAttribute(player) then detected = true end
+
+		if char then
+			for _, desc in ipairs(char:GetDescendants()) do
+				local lowerName = string.lower(desc.Name)
+				if string.find(lowerName, "cocoon", 1, true) or string.find(lowerName, "pupa", 1, true)
+					or string.find(lowerName, "chrysalis", 1, true) then
+					detected = true
+					break
+				end
+			end
+		end
+
+		local now = os.clock()
+		if now - cocoonGuiScanTime >= 1 then
+			cocoonGuiScanTime = now
+			cocoonGuiTextDetected = false
+			for _, desc in ipairs(playerGui:GetDescendants()) do
+				if desc:IsA("TextLabel") and isGuiReallyVisible(desc) then
+					local current = desc
+					local skip = false
+					while current and current ~= playerGui do
+						if current.Name == "OrbTpGui" or current.Name == "AutoMutateGui" then skip = true break end
+						current = current.Parent
+					end
+					if not skip then
+						local upperText = string.upper(desc.Text or "")
+						if string.find(upperText, "COCOON", 1, true) or string.find(upperText, "PUPA", 1, true)
+							or string.find(upperText, "EVOLVING", 1, true) then
+							cocoonGuiTextDetected = true
+							break
+						end
+					end
+				end
+			end
+		end
+		if cocoonGuiTextDetected then detected = true end
+		if detected then lastCocoonTime = now end
+		return PAUSE_WHEN_COCOON and (detected or now - lastCocoonTime < COCOON_RESUME_DELAY)
+	end
+
+	local function waitWhileCocoon(token)
+		while isCocoon() do
+			if not isEnabled or token ~= runToken then return false end
+			task.wait(0.3)
+		end
+		return isEnabled and token == runToken
+	end
+
 	local function clickGuiCenter(guiObj)
 		local absPos = guiObj.AbsolutePosition
 		local absSize = guiObj.AbsoluteSize
@@ -129,7 +207,7 @@ do
 	end
 
 	local function tryAutoRebirth()
-		if not AUTO_REBIRTH_ENABLED or not isEnabled then return end
+		if not AUTO_REBIRTH_ENABLED or not isEnabled or isCocoon() then return end
 		if os.clock() - lastRebirthTime < REBIRTH_COOLDOWN then return end
 
 		for _, gui in ipairs(playerGui:GetChildren()) do
@@ -355,7 +433,7 @@ do
 		tween:Play()
 		local cancelled = false
 		while tween.PlaybackState == Enum.PlaybackState.Playing do
-			if not isEnabled or token ~= runToken or not isOrbAlive(orb) then
+			if not isEnabled or token ~= runToken or not isOrbAlive(orb) or isCocoon() then
 				cancelled = true
 				break
 			end
@@ -404,6 +482,10 @@ do
 			if not isEnabled or token ~= runToken then return false end
 			if not isOrbAlive(orb) then return true end
 			if not root.Parent then return false end
+			if isCocoon() then
+				task.wait(0.3)
+				continue
+			end
 
 			local orbPos = getOrbPosition(orb)
 			if not orbPos or (orbPos - anchorPos).Magnitude > ORB_MOVED_DIST then
@@ -452,6 +534,7 @@ do
 		while true do
 			if isEnabled then
 				local token = runToken
+				if not waitWhileCocoon(token) then task.wait(0.3) continue end
 				local root = getCharRoot()
 				local ok, err = pcall(function()
 					if not (root and root:IsA("BasePart")) then
