@@ -29,6 +29,8 @@ do
 	local AUTO_REBIRTH_ENABLED = true
 	local REBIRTH_COOLDOWN = 2.0
 	local PAUSE_WHEN_COCOON = true
+	local COCOON_CHECK_WALKSPEED = false
+	local COCOON_CHECK_TEXT = true
 	local COCOON_RESUME_DELAY = 1.5
 	-- ==========================================
 
@@ -38,6 +40,8 @@ do
 	local lastCocoonTime = -math.huge
 	local cocoonGuiScanTime = -math.huge
 	local cocoonGuiTextDetected = false
+	local cocoonGuiText = nil
+	local lastCocoonReason = nil
 
 	-- เก็บสถานะของแต่ละ Orb (weak key = Orb ถูกลบแล้วข้อมูลหายเอง)
 	local orbAttempts = setmetatable({}, { __mode = "k" })
@@ -120,43 +124,63 @@ do
 		local char = player.Character
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		local root = char and char:FindFirstChild("HumanoidRootPart")
-		local detected = false
+		local reason = nil
 
-		if char and hum and (hum.WalkSpeed <= 0.5 or hum.PlatformStand) then detected = true end
-		if root and root.Anchored then detected = true end
+		if COCOON_CHECK_WALKSPEED and char and hum
+			and (hum.WalkSpeed <= 0.5 or hum.PlatformStand) then
+			reason = "WalkSpeed"
+		elseif COCOON_CHECK_WALKSPEED and root and root.Anchored then
+			reason = "Anchored"
+		end
 
-		local nameTokens = { "cocoon", "pupa", "chrysalis", "evolv", "molt" }
+		local nameTokens = { "cocoon", "pupa", "chrysalis", "molt" }
 		local function hasCocoonAttribute(inst)
 			if not inst then return false end
 			for attrName, value in pairs(inst:GetAttributes()) do
 				local lowerName = string.lower(attrName)
 				local matchesName = false
-				for _, token in ipairs(nameTokens) do
-					if string.find(lowerName, token, 1, true) then matchesName = true break end
+				if not string.find(lowerName, "evolv", 1, true) then
+					for _, token in ipairs(nameTokens) do
+						if string.find(lowerName, token, 1, true) then matchesName = true break end
+					end
 				end
 				if matchesName and (value == true or (type(value) == "string" and value ~= "")
-					or (type(value) == "number" and value > 0)) then return true end
+					or (type(value) == "number" and value > 0)) then return attrName end
+			end
+			return nil
+		end
+		if not reason then
+			for _, inst in ipairs({ char, hum, root, player }) do
+				local attrName = hasCocoonAttribute(inst)
+				if attrName then reason = "Attr:" .. attrName break end
+			end
+		end
+
+		local function hasVisiblePart(inst)
+			if inst:IsA("BasePart") then return inst.Transparency < 0.95 end
+			if inst:IsA("Model") or inst:IsA("Folder") then
+				for _, child in ipairs(inst:GetDescendants()) do
+					if child:IsA("BasePart") and child.Transparency < 0.95 then return true end
+				end
 			end
 			return false
 		end
-		if hasCocoonAttribute(char) or hasCocoonAttribute(hum) or hasCocoonAttribute(root)
-			or hasCocoonAttribute(player) then detected = true end
-
-		if char then
+		if not reason and char then
 			for _, desc in ipairs(char:GetDescendants()) do
 				local lowerName = string.lower(desc.Name)
-				if string.find(lowerName, "cocoon", 1, true) or string.find(lowerName, "pupa", 1, true)
-					or string.find(lowerName, "chrysalis", 1, true) then
-					detected = true
+				if (string.find(lowerName, "cocoon", 1, true) or string.find(lowerName, "pupa", 1, true)
+					or string.find(lowerName, "chrysalis", 1, true)) and hasVisiblePart(desc) then
+					reason = "Part:" .. desc.Name
 					break
 				end
 			end
 		end
 
 		local now = os.clock()
-		if now - cocoonGuiScanTime >= 1 then
+		if COCOON_CHECK_TEXT and now - cocoonGuiScanTime >= 1 then
 			cocoonGuiScanTime = now
 			cocoonGuiTextDetected = false
+			cocoonGuiText = nil
 			for _, desc in ipairs(playerGui:GetDescendants()) do
 				if desc:IsA("TextLabel") and isGuiReallyVisible(desc) then
 					local current = desc
@@ -166,19 +190,34 @@ do
 						current = current.Parent
 					end
 					if not skip then
-						local upperText = string.upper(desc.Text or "")
-						if string.find(upperText, "COCOON", 1, true) or string.find(upperText, "PUPA", 1, true)
-							or string.find(upperText, "EVOLVING", 1, true) then
+						local upperText = string.upper(string.match(desc.Text or "", "^%s*(.-)%s*$"))
+						if #upperText <= 30 and (string.find(upperText, "COCOON", 1, true)
+							or string.find(upperText, "PUPA", 1, true)
+							or string.find(upperText, "EVOLVING", 1, true)) then
 							cocoonGuiTextDetected = true
+							cocoonGuiText = upperText
 							break
 						end
 					end
 				end
 			end
 		end
-		if cocoonGuiTextDetected then detected = true end
-		if detected then lastCocoonTime = now end
-		return PAUSE_WHEN_COCOON and (detected or now - lastCocoonTime < COCOON_RESUME_DELAY)
+		if COCOON_CHECK_TEXT and not reason and cocoonGuiTextDetected then reason = "Text:" .. (cocoonGuiText or "") end
+		if reason then lastCocoonTime = now end
+		local paused = PAUSE_WHEN_COCOON and (reason ~= nil or now - lastCocoonTime < COCOON_RESUME_DELAY)
+		if paused and not reason then reason = "Resume" end
+		if not PAUSE_WHEN_COCOON then reason = nil end
+
+		if reason ~= lastCocoonReason then
+			lastCocoonReason = reason
+			if reason then warn("[OrbTp] cocoon:", reason) end
+		end
+		if isEnabled and paused then
+			btn.Text = "TP ORB: PAUSE (" .. string.sub(reason or "Resume", 1, 20) .. ")"
+		elseif isEnabled then
+			btn.Text = "TP ORB: ON"
+		end
+		return paused, reason
 	end
 
 	local function waitWhileCocoon(token)
