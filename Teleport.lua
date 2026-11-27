@@ -1,12 +1,14 @@
--- ===== Orb Teleport + Auto Mutate x5 (รวมไฟล์) =====
--- ปุ่ม TP ORB = วาร์ปเก็บ Orb + Auto Rebirth | ปุ่ม AUTO MUTATE x5 = สุ่ม x5 + Skip (หยุดให้ตอนรี)
+-- ===== Orb Tween + Auto Mutate x5 (รวมไฟล์) =====
+-- ปุ่ม TP ORB = Tween เก็บ Orb ที่ใกล้สุด + Auto Rebirth | ปุ่ม AUTO MUTATE x5 = สุ่ม x5 + Skip (หยุดให้ตอนรี)
 
--- ================= ส่วนที่ 1: ORB TELEPORT =================
+-- ================= ส่วนที่ 1: ORB TWEEN =================
 do
 	local Players = game:GetService("Players")
 	local VirtualInputManager = game:GetService("VirtualInputManager")
 	local GuiService = game:GetService("GuiService")
 	local Workspace = game:GetService("Workspace")
+	local TweenService = game:GetService("TweenService")
+	local RunService = game:GetService("RunService")
 
 	local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
 	local playerGui = player:WaitForChild("PlayerGui")
@@ -14,7 +16,9 @@ do
 
 	-- ================= ตั้งค่า =================
 	local DEFAULT_ENABLED = false
-	local TP_DELAY = 1.5            -- เวลาขั้นต่ำระหว่างการวาร์ปไป Orb ใหม่ (1.5 - 2.2)
+	local TWEEN_SPEED = 70          -- ความเร็ว Tween (studs/วินาที) ยิ่งมากยิ่งไว แต่เสี่ยงโดนเตะ
+	local TWEEN_MIN_TIME = 0.08     -- เวลา Tween ขั้นต่ำ
+	local COLLECT_WAIT = 0.5        -- รอเก็บ Orb หลังไปถึงนานสุดกี่วินาที
 	local MAX_SCAN_DISTANCE = 220   -- ระยะค้นหา Orb (Studs)
 	local HEIGHT_OFFSET = 0.0       -- ความสูงเหนือ Orb (0 = ทับตรงกลางเลย เก็บติดง่ายกว่า)
 	local MAX_ATTEMPTS = 2          -- วาร์ปไป Orb เดิมได้กี่รอบ ถ้ายังไม่หายถือว่าเก็บไม่ได้
@@ -313,28 +317,59 @@ do
 
 	local function findBestOrb(currentPos)
 		local bestOrb, bestPos = nil, nil
-		local bestScore = -math.huge
-		local bestTieDist = math.huge
+		local bestDist = math.huge
 
 		for _, child in ipairs(orbsFolder:GetChildren()) do
 			if not isBlacklisted(child) then
 				local orbPos = getOrbPosition(child)
 				if orbPos then
 					local dist = (orbPos - currentPos).Magnitude
-					if dist <= MAX_SCAN_DISTANCE and isOrbVisible(child) and hasGroundBelow(orbPos) then
-						local score = getOrbExpScore(child)
-						if (score > bestScore) or (math.abs(score - bestScore) <= 1e-6 and dist < bestTieDist) then
-							bestScore = score
-							bestTieDist = dist
-							bestOrb = child
-							bestPos = orbPos
-						end
+					if dist <= MAX_SCAN_DISTANCE and dist < bestDist
+						and isOrbVisible(child) and hasGroundBelow(orbPos) then
+						bestDist = dist
+						bestOrb = child
+						bestPos = orbPos
 					end
 				end
 			end
 		end
 
 		return bestOrb, bestPos
+	end
+
+	local function tweenToOrb(root, orb, startPos, token)
+		local targetPos = startPos + Vector3.new(0, HEIGHT_OFFSET, 0)
+		local distance = (targetPos - root.Position).Magnitude
+		local duration = math.max(TWEEN_MIN_TIME, distance / TWEEN_SPEED)
+		local rotation = root.CFrame - root.CFrame.Position
+		local tween = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {
+			CFrame = CFrame.new(targetPos) * rotation,
+		})
+		local velocityConnection = RunService.Heartbeat:Connect(function()
+			if root.Parent then
+				root.AssemblyLinearVelocity = Vector3.zero
+				root.AssemblyAngularVelocity = Vector3.zero
+			end
+		end)
+
+		tween:Play()
+		local cancelled = false
+		while tween.PlaybackState == Enum.PlaybackState.Playing do
+			if not isEnabled or token ~= runToken or not isOrbAlive(orb) then
+				cancelled = true
+				break
+			end
+			local orbPos = getOrbPosition(orb)
+			if not orbPos or (orbPos - startPos).Magnitude > ORB_MOVED_DIST then
+				cancelled = true
+				break
+			end
+			task.wait()
+		end
+
+		if cancelled then tween:Cancel() end
+		velocityConnection:Disconnect()
+		return not cancelled and isEnabled and token == runToken
 	end
 
 	local function setRootCFrame(root, pos)
@@ -430,10 +465,14 @@ do
 						return
 					end
 
-					local tpStart = os.clock()
-					setRootCFrame(root, orbPos + Vector3.new(0, HEIGHT_OFFSET, 0))
-					local collected = waitForCollect(root, orb, orbPos, TP_DELAY, token)
-					local remaining = TP_DELAY - (os.clock() - tpStart)
+					local arrived = tweenToOrb(root, orb, orbPos, token)
+					if not arrived then
+						-- Orb ถูกเก็บ/ลอยหนีระหว่างทาง → ห้ามเลือกซ้ำ
+						orbBlacklistUntil[orb] = os.clock() + BLACKLIST_TIME
+						task.wait()
+						return
+					end
+					local collected = waitForCollect(root, orb, orbPos, COLLECT_WAIT, token)
 
 					if collected then
 						-- Orb ที่เก็บแล้วแต่ยังค้างใน folder (กำลังลอยขึ้น) ห้ามเลือกซ้ำ
@@ -446,12 +485,8 @@ do
 						if orbAttempts[orb] >= MAX_ATTEMPTS then
 							orbBlacklistUntil[orb] = os.clock() + BLACKLIST_TIME
 						end
-					else
-						-- เก็บได้แล้ว แต่ยังเคารพเวลาขั้นต่ำ ไม่ให้วาร์ปถี่เกิน
-						if remaining > 0 then
-							waitInterruptible(remaining, token)
-						end
 					end
+					task.wait()
 				end)
 				if not ok then
 					warn("[OrbTp] error:", err)
